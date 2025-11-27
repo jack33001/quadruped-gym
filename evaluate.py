@@ -13,10 +13,10 @@ HEADLESS = False  # Set to False to see live visualization
 RECORD_VIDEO = False  # Video recording in headless mode is complex, disable for now
 VIDEO_PATH = "logs/quadruped_walking/eval_video.mp4"
 VIDEO_FPS = 30
-NUM_ENVS = 1
-NUM_EPISODES = 5
+NUM_ENVS = 16
+NUM_EPISODES = 32
 EXPERIMENT_NAME = "quadruped_walking"
-CHECKPOINT = "model_79.pt"
+CHECKPOINT = "model_149.pt"
 
 from isaaclab.app import AppLauncher
 
@@ -42,7 +42,7 @@ def evaluate():
     """Evaluate trained policy."""
     
     # Load saved configurations
-    log_dir = f"IsaacLab/logs/{EXPERIMENT_NAME}"
+    log_dir = f"logs/{EXPERIMENT_NAME}"
     if not os.path.exists(log_dir):
         raise ValueError(f"Log directory {log_dir} not found")
     

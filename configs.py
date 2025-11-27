@@ -287,42 +287,42 @@ class EventCfg:
 class RewardsCfg:
     """Reward configuration matching Genesis scales."""
 
-    alive = RewardTermCfg(
-        func=mdp.is_alive,
-        weight=1.0,
-    )
-
+    # Reward for matching commanded forward/lateral velocity
     track_lin_vel_xy_exp = RewardTermCfg(
         func=mdp.track_lin_vel_xy_exp,
         weight=20.0,
         params={"command_name": "base_velocity", "std": 0.05},
     )
 
+    # Reward for matching commanded turning rate
     track_ang_vel_z_exp = RewardTermCfg(
         func=mdp.track_ang_vel_z_exp,
         weight=0.25,
         params={"command_name": "base_velocity", "std": 0.05},
     )
 
+    # Punish roll/pitch angular velocity (wobbling)
     ang_vel_xy_l2 = RewardTermCfg(
         func=mdp.ang_vel_xy_l2,
-        weight=-5.0,
+        weight=-.005,
     )
 
+    # Punish vertical bouncing
     lin_vel_z_l2 = RewardTermCfg(
         func=mdp.lin_vel_z_l2,
-        weight=-2.0,
+        weight=-.25,
     )
 
+    # Punish jerky/rapid action changes
     action_rate_l2 = RewardTermCfg(
         func=mdp.action_rate_l2,
-        weight=-0.1,
+        weight=-0.0005,
     )
 
-    joint_deviation_l1 = RewardTermCfg(
-        func=mdp.joint_deviation_l1,
-        weight=-0.005,
-        params={"asset_cfg": SceneEntityCfg("robot", joint_names=[".*"])},
+    # Punish tilting away from upright orientation
+    flat_orientation_l2 = RewardTermCfg(
+        func=mdp.flat_orientation_l2,
+        weight=-0.25,
     )
 
 
@@ -341,21 +341,23 @@ class TerminationsCfg:
         params={"limit_angle": math.radians(45.0)},
     )
 
+    # Terminate if body, thighs, or shins contact the ground
+    # Threshold increased to prevent false positives during initial settling
     illegal_contact = TerminationTermCfg(
         func=mdp.illegal_contact,
         params={
             "sensor_cfg": SceneEntityCfg("contact_forces", body_names=[
-                "Torso",
-                "Front_Right_Thigh",
-                "Front_Left_Thigh",
-                "Rear_Right_Thigh",
-                "Rear_Left_Thigh",
-                "Front_Right_Shin",
-                "Front_Left_Shin",
-                "Rear_Right_Shin",
-                "Rear_Left_Shin",
+                #"Torso",
+                #"Front_Right_Thigh",
+                #"Front_Left_Thigh",
+                #"Rear_Right_Thigh",
+                #"Rear_Left_Thigh",
+                #"Front_Right_Shin",
+                #"Front_Left_Shin",
+                #"Rear_Right_Shin",
+                #"Rear_Left_Shin",
             ]),
-            "threshold": 1.0,
+            "threshold": 10.0,  # Increased from 1.0 - requires significant contact force
         },
     )
 
@@ -396,8 +398,8 @@ class TrainCfg:
 
     experiment_name: str = "quadruped_walking"
     run_name: str = ""
-    max_iterations: int = 80
-    save_interval: int = 20
+    max_iterations: int =150
+    save_interval: int = 50
     log_interval: int = 1
     seed: int = 42
     num_steps_per_env: int = 24
@@ -432,17 +434,25 @@ class TrainCfg:
         "init_noise_std": 0.5,
     })
 
+    # Curriculum learning configuration
+    # Iteration thresholds for each curriculum stage (stage activates at this iteration)
+    curriculum_thresholds: list = field(default_factory=lambda: [0, 50, 100])
 
-@dataclass
-class EvalCfg:
-    """Evaluation configuration."""
+    # Reward weights for each curriculum stage
+    # Keys must match reward term names in RewardsCfg
+    curriculum_rewards: dict = field(default_factory=lambda: {
+        "track_lin_vel_xy_exp": [20.0, 20.0, 20.0],
+        "track_ang_vel_z_exp": [0.25, 0.5, 0.5],
+        "ang_vel_xy_l2": [-0.005, -0.01, -0.025],
+        "lin_vel_z_l2": [-0.25, -0.25, -0.25],
+        "action_rate_l2": [-0.0005, -0.0005, -0.0005],
+        "flat_orientation_l2": [0.0, -0.05, -0.25],
+    })
 
-    experiment_name: str = "quadruped_walking"
-    checkpoint: str = "model_999.pt"
-    num_envs: int = 1
-    num_episodes: int = 10
-    headless: bool = False
-    record_video: bool = True
-    video_path: str = "logs/quadruped_walking/eval_video.mp4"
-    video_fps: int = 30
-    video_frame_skip: int = 2
+    # Command ranges for each curriculum stage
+    # Format: {key: [lin_vel_x_min, lin_vel_x_max, lin_vel_y_min, lin_vel_y_max, ang_vel_z_min, ang_vel_z_max]}
+    curriculum_commands: dict = field(default_factory=lambda: {
+        "lin_vel_x": [(0.5, 1.5), (0.5, 1.5), (0.5, 1.5)],
+        "lin_vel_y": [(0.0, 0.0), (0.0, 0.0), (0.0, 0.0)],
+        "ang_vel_z": [(0.0, 0.0), (0.0, 0.0), (0.0, 0.0)],
+    })

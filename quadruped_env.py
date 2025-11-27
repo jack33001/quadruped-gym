@@ -1,6 +1,7 @@
 """
 RSL-RL compatible wrapper for Isaac Lab quadruped environment.
 """
+import math
 import torch
 from tensordict import TensorDict
 
@@ -28,6 +29,11 @@ class IsaacLabVecEnvWrapper(VecEnv):
         # Buffers
         self.episode_length_buf = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         
+        # Phase tracking for gait clock signal
+        self.phase = torch.zeros(self.num_envs, device=self.device)
+        self.phase_freq = 2.0  # Hz - gait frequency
+        self.phase_dt = env.step_dt * self.phase_freq * 2.0 * math.pi
+        
         # Store last observation for get_observations()
         self._last_obs = None
         
@@ -41,6 +47,8 @@ class IsaacLabVecEnvWrapper(VecEnv):
     def reset(self):
         """Reset all environments."""
         obs_dict, _ = self._env.reset()
+        # Reset phase for all envs
+        self.phase.zero_()
         self._last_obs = self._convert_obs(obs_dict)
         return self._last_obs
 
@@ -55,8 +63,15 @@ class IsaacLabVecEnvWrapper(VecEnv):
         
         obs_dict, rewards, terminated, truncated, extras = self._env.step(actions)
         
+        # Update phase (wraps around at 2*pi)
+        self.phase = (self.phase + self.phase_dt) % (2.0 * math.pi)
+        
         # Combine terminated and truncated for RSL-RL
         dones = terminated | truncated
+        
+        # Reset phase for terminated envs
+        if dones.any():
+            self.phase[dones] = 0.0
         
         # Convert observations
         self._last_obs = self._convert_obs(obs_dict)
@@ -88,6 +103,15 @@ class IsaacLabVecEnvWrapper(VecEnv):
         """Convert Isaac Lab obs dict to TensorDict for RSL-RL."""
         # Ensure observations are float32 and contiguous
         policy_obs = obs_dict["policy"].float().contiguous()
+        
+        # Append phase signal (sin and cos for continuity)
+        phase_obs = torch.stack([
+            torch.sin(self.phase),
+            torch.cos(self.phase)
+        ], dim=-1)
+        
+        # Concatenate phase to policy observations
+        policy_obs = torch.cat([policy_obs, phase_obs], dim=-1)
         
         # Clip observations to reasonable range
         policy_obs = torch.clamp(policy_obs, -100.0, 100.0)
