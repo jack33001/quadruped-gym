@@ -1,0 +1,51 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+*.egg
+dist/
+build/
+
+# Virtual environments
+env/
+venv/
+.env/
+
+# Logs and checkpoints
+logs/
+*.log
+*.pt
+*.pth
+*.pkl
+
+# Isaac Sim / Lab caches
+.isaac_sim/
+.kit/
+_isaac_sim/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp
+/tmp/
+
+# Large binary files (meshes are okay, but exclude generated USDs if too large)
+# Uncomment if needed:
+# *.usd
+# *.usda
+# *.usdc
+
+# IsaacLab submodule (if you want to track it separately)
+# IsaacLab/

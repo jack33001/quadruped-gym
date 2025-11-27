@@ -1,0 +1,99 @@
+<mujoco model="Quadruped URDF">
+  <compiler angle="radian" meshdir="meshes/"/>
+  <asset>
+    <mesh name="Body_bin_rotated" file="Body_bin_rotated_scaled.stl"/>
+    <mesh name="Front Right Thigh" file="Front Right Thigh.STL"/>
+    <mesh name="Front Right Shin" file="Front Right Shin.STL"/>
+    <mesh name="Front Left Thigh" file="Front Left Thigh.STL"/>
+    <mesh name="Front Left Shin" file="Front Left Shin.STL"/>
+    <mesh name="Rear Right Thigh" file="Rear Right Thigh.STL"/>
+    <mesh name="Rear Right Shin" file="Rear Right Shin.STL"/>
+    <mesh name="Rear Left Thigh" file="Rear Left Thigh.STL"/>
+    <mesh name="Rear Left Shin" file="Rear Left Shin.STL"/>
+  </asset>
+  <asset>
+    <texture name="grid" type="2d" builtin="checker" rgb1=".1 .2 .3"
+     rgb2=".2 .3 .4" width="300" height="300" mark="none"/>
+    <material name="grid" texture="grid" texrepeat="6 6"
+     texuniform="true" reflectance=".2"/>
+     <material name="wall" rgba='.5 .5 .5 1'/>
+  </asset>
+  <worldbody>
+    <light name="light" pos="-.2 0 1"/>
+    
+    <body name="Torso" pos="0 0 .28">
+      <geom name="Body" type="mesh" mesh="Body_bin_rotated" contype="1" conaffinity="1" rgba="0.385266 0.596728 0.703907 1" friction="1.0 0.005 0.0001"/>
+      <joint name="Torso Free" type="free"/>
+      <inertial pos="-0.0019144 -0.0004967 -0.00656282" quat="0.499113 0.500689 -0.500109 0.500088" mass="2.72713097" diaginertia="0.03707987 0.037216486 0.00367331"/>
+      
+      <!-- Front Right Leg -->
+      <body name="Front Right Thigh" pos="0.1796 -0.14680525 0" quat="0.7071067812 0.7071067812 0 0">
+        <inertial pos="2.43741e-05 -0.0142051 -0.00547111" quat="0.499113 0.500689 -0.500109 0.500088" mass="0.513489" diaginertia="0.00102412 0.000703444 0.000379087"/>
+        <joint name="Front Right Hip" pos="0 0 0" axis="0 0 1"/>
+        <geom name="Front Right Thigh" type="mesh" mesh="Front Right Thigh" contype="1" conaffinity="1" rgba=".580992 .393846 .712274 1" friction="1.0 0.005 0.0001"/>
+        
+        <body name="Front Right Shin" pos="0 -0.13625 0.014875">
+          <inertial pos="0.124878 -0.00732498 0.000175056" quat="0.0207105 0.70682 -0.0207132 0.706787" mass="0.12961" diaginertia="5.097e-05 4.99084e-05 3.51177e-05"/>
+          <joint name="Front Right Knee" pos="0 0 0" axis="0 0 1"/>
+          <geom name="Front Right Shin" type="mesh" mesh="Front Right Shin" contype="1" conaffinity="1" rgba="0.741616 0.534085 0.405905 1" friction="1.0 0.005 0.0001"/>
+          
+          <!-- Foot as child of shin so it moves with the shin -->
+          <body name="Front Right Foot" pos="0.1375 -0.0075 0">
+            <geom name="Front Right Foot" type="sphere" size="0.03" contype="1" conaffinity="1" rgba="1.0 0.0 0.0 1" friction="1.0 0.005 0.0001"/>
+          </body>
+        </body>
+      </body>
+      
+      <!-- Front Left Leg -->
+      <body name="Front Left Thigh" pos="0.1796 0.14680525 0" quat="0.7071067812 0.7071067812 0 0">
+        <inertial pos="-2.69567e-06 -0.0142673 0.00542296" quat="0.500442 0.499547 -0.499649 0.500361" mass="0.513479" diaginertia="0.00102412 0.000703378 0.000379152"/>
+        <joint name="Front Left Hip" pos="0 0 0" axis="0 0 -1"/>
+        <geom name="Front Left Thigh" type="mesh" mesh="Front Left Thigh" contype="1" conaffinity="1" rgba=".580992 .393846 .712274 1" friction="1.0 0.005 0.0001"/>
+        
+        <body name="Front Left Shin" pos="0 -0.13625 -0.015125">
+          <inertial pos="0.124878 -0.00732498 0.000177556" quat="0.0207105 0.70682 -0.0207132 0.706787" mass="0.12961" diaginertia="5.097e-05 4.99084e-05 3.51177e-05"/>
+          <joint name="Front Left Knee" pos="0 0 0" axis="0 0 1"/>
+          <geom name="Front Left Shin" type="mesh" mesh="Front Left Shin" contype="1" conaffinity="1" rgba="0.741616 0.534085 0.405905 1" friction="1.0 0.005 0.0001"/>
+          
+          <body name="Front Left Foot" pos="0.1375 -0.0075 0">
+            <geom name="Front Left Foot" type="sphere" size="0.03" contype="1" conaffinity="1" rgba="1.0 0.0 0.0 1" friction="1.0 0.005 0.0001"/>
+          </body>
+        </body>
+      </body>
+      
+      <!-- Rear Right Leg -->
+      <body name="Rear Right Thigh" pos="-0.1796 -0.14680525 0" quat="0.7071067812 0.7071067812 0 0">
+        <inertial pos="2.43741e-05 -0.0142051 -0.00547111" quat="0.499113 0.500689 -0.500109 0.500088" mass="0.513489" diaginertia="0.00102412 0.000703444 0.000379087"/>
+        <joint name="Rear Right Hip" pos="0 0 0" axis="0 0 -1"/>
+        <geom name="Rear Right Thigh" type="mesh" mesh="Rear Right Thigh" contype="1" conaffinity="1" rgba=".580992 .393846 .712274 1" friction="1.0 0.005 0.0001"/>
+        
+        <body name="Rear Right Shin" pos="0 -0.13625 0.015125">
+          <inertial pos="0.124878 -0.00732498 0.000177556" quat="0.0207105 0.70682 -0.0207132 0.706787" mass="0.12961" diaginertia="5.097e-05 4.99084e-05 3.51177e-05"/>
+          <joint name="Rear Right Knee" pos="0 0 0" axis="0 0 1"/>
+          <geom name="Rear Right Shin" type="mesh" mesh="Rear Right Shin" contype="1" conaffinity="1" rgba="0.741616 0.534085 0.405905 1" friction="1.0 0.005 0.0001"/>
+          
+          <body name="Rear Right Foot" pos="0.1375 -0.0075 0">
+            <geom name="Rear Right Foot" type="sphere" size="0.03" contype="1" conaffinity="1" rgba="1.0 0.0 0.0 1" friction="1.0 0.005 0.0001"/>
+          </body>
+        </body>
+      </body>
+      
+      <!-- Rear Left Leg -->
+      <body name="Rear Left Thigh" pos="-0.1796 0.14680525 0" quat="0.7071067812 0.7071067812 0 0">
+        <inertial pos="-2.69567e-06 -0.0142673 0.00542296" quat="0.500442 0.499547 -0.499649 0.500361" mass="0.513479" diaginertia="0.00102412 0.000703378 0.000379152"/>
+        <joint name="Rear Left Hip" pos="0 0 0" axis="0 0 1"/>
+        <geom name="Rear Left Thigh" type="mesh" mesh="Rear Left Thigh" contype="1" conaffinity="1" rgba=".580992 .393846 .712274 1" friction="1.0 0.005 0.0001"/>
+        
+        <body name="Rear Left Shin" pos="0 -0.13625 -0.015125">
+          <inertial pos="0.124878 -0.00732498 0.000175056" quat="0.0207105 0.70682 -0.0207132 0.706787" mass="0.12961" diaginertia="5.097e-05 4.99084e-05 3.51177e-05"/>
+          <joint name="Rear Left Knee" pos="0 0 0" axis="0 0 1"/>
+          <geom name="Rear Left Shin" type="mesh" mesh="Rear Left Shin" contype="1" conaffinity="1" rgba="0.741616 0.534085 0.405905 1" friction="1.0 0.005 0.0001"/>
+          
+          <body name="Rear Left Foot" pos="0.1375 -0.0075 0">
+            <geom name="Rear Left Foot" type="sphere" size="0.03" contype="1" conaffinity="1" rgba="1.0 0.0 0.0 1" friction="1.0 0.005 0.0001"/>
+          </body>
+        </body>
+      </body>
+    </body>
+  </worldbody>
+</mujoco>
