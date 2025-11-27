@@ -69,6 +69,62 @@ def imu_projected_gravity(env, sensor_cfg: SceneEntityCfg) -> torch.Tensor:
 
 
 ##
+# Custom termination functions
+##
+
+def base_height_below_threshold(env, minimum_height: float, asset_cfg: SceneEntityCfg) -> torch.Tensor:
+    """Terminate if base height drops below minimum threshold."""
+    asset = env.scene[asset_cfg.name]
+    return asset.data.root_pos_w[:, 2] < minimum_height
+
+
+##
+# Custom reward functions
+##
+
+def foot_slip_penalty(env, sensor_cfg: SceneEntityCfg, asset_cfg: SceneEntityCfg, threshold: float = 0.1) -> torch.Tensor:
+    """Penalize feet sliding on ground while in contact.
+    
+    Computes the velocity of feet that are in contact with the ground.
+    Returns the sum of squared xy velocities for feet in contact.
+    """
+    # Get contact sensor
+    contact_sensor = env.scene.sensors[sensor_cfg.name]
+    # Get asset for body velocities
+    asset = env.scene[asset_cfg.name]
+    
+    # Get contact forces (num_envs, num_bodies, 3)
+    contact_forces = contact_sensor.data.net_forces_w
+    num_contact_bodies = contact_forces.shape[1]
+    
+    # Check which feet are in contact (force magnitude > threshold)
+    in_contact = torch.norm(contact_forces, dim=-1) > threshold  # (num_envs, num_bodies)
+    
+    # Get linear velocities of all bodies in world frame
+    body_vel = asset.data.body_lin_vel_w  # (num_envs, num_bodies, 3)
+    
+    # Use velocities for the contact sensor bodies (last N bodies typically are feet)
+    # Take the last num_contact_bodies from body velocities
+    if body_vel.shape[1] >= num_contact_bodies:
+        foot_vel = body_vel[:, -num_contact_bodies:, :]  # (num_envs, num_feet, 3)
+    else:
+        foot_vel = body_vel
+    
+    # Ensure shapes match
+    if foot_vel.shape[1] != num_contact_bodies:
+        # Fallback: just use all available velocities up to contact bodies count
+        foot_vel = body_vel[:, :num_contact_bodies, :]
+    
+    # Compute xy velocity magnitude squared for feet in contact
+    foot_vel_xy_sq = foot_vel[:, :, 0]**2 + foot_vel[:, :, 1]**2  # (num_envs, num_feet)
+    
+    # Only penalize feet that are in contact
+    slip_penalty = torch.sum(foot_vel_xy_sq * in_contact.float(), dim=-1)  # (num_envs,)
+    
+    return slip_penalty
+
+
+##
 # Robot Configuration
 ##
 
@@ -137,7 +193,7 @@ class QuadrupedSceneCfg(InteractiveSceneCfg):
 
     robot: ArticulationCfg = QUADRUPED_CFG
 
-    # IMU sensor on torso - using ImuCfg (not ImuSensorCfg)
+    # IMU sensor on torso
     imu = ImuCfg(
         prim_path="{ENV_REGEX_NS}/Robot/Quadruped/Torso/Torso",
         update_period=0.0,
@@ -150,6 +206,14 @@ class QuadrupedSceneCfg(InteractiveSceneCfg):
         prim_path="{ENV_REGEX_NS}/Robot/Quadruped/Torso/.*",
         history_length=3,
         track_air_time=False,
+        update_period=0.0,
+    )
+
+    # Contact sensor for feet - used for foot slip detection
+    foot_contact = ContactSensorCfg(
+        prim_path="{ENV_REGEX_NS}/Robot/Quadruped/Torso/.*_Foot",
+        history_length=3,
+        track_air_time=True,
         update_period=0.0,
     )
 
@@ -325,6 +389,17 @@ class RewardsCfg:
         weight=-0.25,
     )
 
+    # Punish feet sliding on ground while in contact
+    foot_slip = RewardTermCfg(
+        func=foot_slip_penalty,
+        weight=-0.1,
+        params={
+            "sensor_cfg": SceneEntityCfg("foot_contact"),
+            "asset_cfg": SceneEntityCfg("robot"),
+            "threshold": 0.1,
+        },
+    )
+
 
 ##
 # Termination Configuration
@@ -341,23 +416,21 @@ class TerminationsCfg:
         params={"limit_angle": math.radians(45.0)},
     )
 
+    # Terminate if base height drops too low (fallen over)
+    base_height_low = TerminationTermCfg(
+        func=base_height_below_threshold,
+        params={
+            "minimum_height": 0.1,
+            "asset_cfg": SceneEntityCfg("robot"),
+        },
+    )
+
     # Terminate if body, thighs, or shins contact the ground
-    # Threshold increased to prevent false positives during initial settling
     illegal_contact = TerminationTermCfg(
         func=mdp.illegal_contact,
         params={
-            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=[
-                #"Torso",
-                #"Front_Right_Thigh",
-                #"Front_Left_Thigh",
-                #"Rear_Right_Thigh",
-                #"Rear_Left_Thigh",
-                #"Front_Right_Shin",
-                #"Front_Left_Shin",
-                #"Rear_Right_Shin",
-                #"Rear_Left_Shin",
-            ]),
-            "threshold": 10.0,  # Increased from 1.0 - requires significant contact force
+            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=[]),
+            "threshold": 10.0,
         },
     )
 
@@ -398,7 +471,7 @@ class TrainCfg:
 
     experiment_name: str = "quadruped_walking"
     run_name: str = ""
-    max_iterations: int =150
+    max_iterations: int = 150
     save_interval: int = 50
     log_interval: int = 1
     seed: int = 42
@@ -435,22 +508,18 @@ class TrainCfg:
     })
 
     # Curriculum learning configuration
-    # Iteration thresholds for each curriculum stage (stage activates at this iteration)
     curriculum_thresholds: list = field(default_factory=lambda: [0, 50, 100])
 
-    # Reward weights for each curriculum stage
-    # Keys must match reward term names in RewardsCfg
     curriculum_rewards: dict = field(default_factory=lambda: {
         "track_lin_vel_xy_exp": [20.0, 20.0, 20.0],
-        "track_ang_vel_z_exp": [0.25, 0.5, 0.5],
-        "ang_vel_xy_l2": [-0.005, -0.01, -0.025],
+        "track_ang_vel_z_exp": [0.25, 0.25, 0.25],
+        "ang_vel_xy_l2": [-0.005, -0.01, -0.01],
         "lin_vel_z_l2": [-0.25, -0.25, -0.25],
         "action_rate_l2": [-0.0005, -0.0005, -0.0005],
-        "flat_orientation_l2": [0.0, -0.05, -0.25],
+        "flat_orientation_l2": [0.0, -0.0, -0.05],
+        "foot_slip": [-0.0, -0.0, -0.0],
     })
 
-    # Command ranges for each curriculum stage
-    # Format: {key: [lin_vel_x_min, lin_vel_x_max, lin_vel_y_min, lin_vel_y_max, ang_vel_z_min, ang_vel_z_max]}
     curriculum_commands: dict = field(default_factory=lambda: {
         "lin_vel_x": [(0.5, 1.5), (0.5, 1.5), (0.5, 1.5)],
         "lin_vel_y": [(0.0, 0.0), (0.0, 0.0), (0.0, 0.0)],
