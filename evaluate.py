@@ -17,7 +17,7 @@ VIDEO_FPS = 30
 NUM_ENVS = 16
 NUM_EPISODES = 32
 EXPERIMENT_NAME = "quadruped_walking"
-CHECKPOINT = "model_149.pt"
+CHECKPOINT = "model_199.pt"
 
 from isaaclab.app import AppLauncher
 
@@ -32,6 +32,7 @@ import pickle
 import torch
 import numpy as np
 import shutil
+import math
 
 from isaaclab.envs import ManagerBasedRLEnv
 from rsl_rl.modules import ActorCritic
@@ -185,7 +186,16 @@ def evaluate():
     policy.eval()
     print("Policy loaded successfully\n")
     
-    # Run evaluation
+    # Track termination reasons
+    termination_counts = {
+        "time_out": 0,
+        "bad_orientation": 0,
+        "base_height_low": 0,
+        "illegal_contact": 0,
+        "total_resets": 0,
+    }
+
+    # Evaluation loop
     print("Running evaluation...")
     if not HEADLESS:
         print("Live visualization enabled - watch the simulator window")
@@ -206,6 +216,15 @@ def evaluate():
     all_episode_rewards = []
     all_episode_lengths = []
     
+    # Track termination reasons
+    termination_counts = {
+        "time_out": 0,
+        "bad_orientation": 0,
+        "base_height_low": 0,
+        "illegal_contact": 0,
+        "unknown": 0,
+    }
+    
     try:
         while completed_episodes < NUM_EPISODES:
             with torch.no_grad():
@@ -224,15 +243,86 @@ def evaluate():
             episode_lengths += 1
             step_count += 1
             
-            # Log progress every 100 steps
-            if step_count % 100 == 0:
-                print(f"  Step {step_count}: reward={rewards[0].item():.3f}, "
-                      f"episode_reward={episode_rewards[0].item():.2f}, "
-                      f"frames={frame_count}")
-            
-            # Handle episode terminations
+            # Debug termination reasons when episodes end
             if dones.any():
                 done_indices = dones.nonzero(as_tuple=False).squeeze(-1)
+                if done_indices.dim() == 0:
+                    done_indices = done_indices.unsqueeze(0)
+                
+                # Get termination info from Isaac Lab environment
+                isaac_env = env.unwrapped
+                robot = isaac_env.scene["robot"]
+                
+                # Get body names for contact sensor
+                contact_sensor = isaac_env.scene.sensors["contact_forces"]
+                body_names = []
+                if hasattr(contact_sensor, 'body_names'):
+                    body_names = contact_sensor.body_names
+                elif hasattr(contact_sensor, 'cfg') and hasattr(contact_sensor.cfg, 'prim_path'):
+                    # Try to extract from prim path pattern
+                    body_names = [f"body_{i}" for i in range(contact_sensor.data.net_forces_w.shape[1])]
+                
+                for idx in done_indices:
+                    idx_item = idx.item()
+                    
+                    # Check each termination condition manually
+                    height = robot.data.root_pos_w[idx_item, 2].item()
+                    quat = robot.data.root_quat_w[idx_item]
+                    w = quat[0].item()
+                    
+                    # Get terrain height for relative height calculation
+                    terrain_height = 0.0
+                    if hasattr(isaac_env.scene, 'terrain') and isaac_env.scene.terrain is not None:
+                        terrain = isaac_env.scene.terrain
+                        if hasattr(terrain, 'env_origins'):
+                            terrain_height = terrain.env_origins[idx_item, 2].item()
+                    height_above_terrain = height - terrain_height
+                    
+                    # Compute tilt angle from quaternion w component
+                    tilt_angle = 2.0 * math.acos(min(abs(w), 1.0))
+                    tilt_deg = math.degrees(tilt_angle)
+                    
+                    # Check contact forces and identify which bodies
+                    forces = contact_sensor.data.net_forces_w[idx_item]
+                    force_mags = torch.norm(forces, dim=-1)
+                    max_force = force_mags.max().item()
+                    
+                    # Find bodies with contact force above threshold
+                    contact_threshold = 10.0
+                    contacting_bodies = []
+                    for body_idx, force_mag in enumerate(force_mags):
+                        if force_mag.item() > contact_threshold:
+                            body_name = body_names[body_idx] if body_idx < len(body_names) else f"body_{body_idx}"
+                            contacting_bodies.append((body_name, force_mag.item()))
+                    
+                    # Determine termination reason
+                    reason = "unknown"
+                    if episode_lengths[idx_item].item() >= env.max_episode_length:
+                        reason = "time_out"
+                    elif height_above_terrain < 0.1:
+                        reason = "base_height_low"
+                    elif tilt_deg > 45.0:
+                        reason = "bad_orientation"
+                    elif max_force > contact_threshold:
+                        reason = "illegal_contact"
+                    
+                    termination_counts[reason] += 1
+                    
+                    # Print debug info for all non-timeout terminations
+                    if reason != "time_out":
+                        print(f"\n  TERMINATION DEBUG (Episode {completed_episodes + 1}):")
+                        print(f"    Reason: {reason}")
+                        print(f"    Height above terrain: {height_above_terrain:.3f}m (threshold: 0.1m)")
+                        print(f"    World height: {height:.3f}m, Terrain height: {terrain_height:.3f}m")
+                        print(f"    Tilt: {tilt_deg:.1f} deg (threshold: 45 deg)")
+                        print(f"    Max contact force: {max_force:.1f}N (threshold: {contact_threshold}N)")
+                        if contacting_bodies:
+                            print(f"    Bodies in contact:")
+                            for body_name, force in contacting_bodies:
+                                print(f"      - {body_name}: {force:.1f}N")
+                        print(f"    Episode length: {episode_lengths[idx_item].item():.0f} steps")
+                
+                # Record completed episodes
                 for idx in done_indices:
                     completed_episodes += 1
                     ep_reward = episode_rewards[idx].item()
@@ -256,6 +346,17 @@ def evaluate():
     
     except KeyboardInterrupt:
         print("\n\nEvaluation interrupted by user")
+    
+    # Print termination summary
+    print("\n" + "=" * 60)
+    print("TERMINATION REASONS SUMMARY")
+    print("=" * 60)
+    total = sum(termination_counts.values())
+    for reason, count in termination_counts.items():
+        if count > 0:
+            pct = 100.0 * count / total if total > 0 else 0
+            print(f"  {reason}: {count} ({pct:.1f}%)")
+    print("=" * 60)
     
     # Create video from frames
     if RECORD_VIDEO and frame_count > 0:

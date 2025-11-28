@@ -13,11 +13,13 @@ import sys
 os.environ["PYTORCH_NVFUSER_DISABLE_FALLBACK"] = "1"
 os.environ["TORCH_ALLOW_TF32_CUBLAS_OVERRIDE"] = "1"
 
-# Isaac Lab / Isaac Sim setup - must come BEFORE any other imports
+# Configuration - set this before AppLauncher
+HEADLESS = True  # Set to False to show viewer for debugging
+
 from isaaclab.app import AppLauncher
 
 # Create app launcher and launch the simulator
-app_launcher = AppLauncher(headless=True)
+app_launcher = AppLauncher(headless=HEADLESS)
 simulation_app = app_launcher.app
 
 # Now we can import everything else
@@ -101,10 +103,11 @@ class OnPolicyRunnerWithCurriculum(OnPolicyRunner):
         super().__init__(*args, **kwargs)
         self.train_cfg_obj = train_cfg_obj
         self.current_stage = [0]  # Use list for mutability in callback
+        self._terrain_update_counter = 0
 
     def log(self, locs: dict, width: int = 80, pad: int = 35) -> None:
         """Override log method to add curriculum update and explicit flush."""
-        # Update curriculum based on current iteration
+        # Update reward curriculum based on current iteration
         if self.train_cfg_obj is not None:
             update_curriculum(
                 self.env, 
@@ -112,6 +115,31 @@ class OnPolicyRunnerWithCurriculum(OnPolicyRunner):
                 self.current_learning_iteration,
                 self.current_stage
             )
+            
+            # Update terrain curriculum periodically
+            if self.train_cfg_obj.terrain_curriculum_enabled:
+                self._terrain_update_counter += 1
+                if self._terrain_update_counter >= self.train_cfg_obj.terrain_curriculum_update_freq:
+                    self._terrain_update_counter = 0
+                    self.env.update_terrain_curriculum(
+                        survival_threshold=self.train_cfg_obj.terrain_curriculum_survival_threshold,
+                        velocity_threshold=self.train_cfg_obj.terrain_curriculum_velocity_threshold,
+                    )
+                    # Log terrain level distribution
+                    if hasattr(self.env, 'terrain_levels'):
+                        mean_level = self.env.terrain_levels.float().mean().item()
+                        max_level = self.env.terrain_levels.max().item()
+                        if self.writer is not None:
+                            self.writer.add_scalar(
+                                "Curriculum/terrain_level_mean", 
+                                mean_level, 
+                                self.current_learning_iteration
+                            )
+                            self.writer.add_scalar(
+                                "Curriculum/terrain_level_max", 
+                                max_level, 
+                                self.current_learning_iteration
+                            )
         
         super().log(locs, width, pad)
         # Force flush to ensure TensorBoard updates live

@@ -15,6 +15,19 @@ from isaaclab.managers import EventTermCfg, ObservationGroupCfg, ObservationTerm
 from isaaclab.managers import RewardTermCfg, SceneEntityCfg, TerminationTermCfg
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sensors import ContactSensorCfg, ImuCfg
+from isaaclab.terrains import TerrainImporterCfg, TerrainGeneratorCfg
+from isaaclab.terrains.height_field.hf_terrains_cfg import (
+    HfRandomUniformTerrainCfg,
+    HfSteppingStonesTerrainCfg,
+    HfDiscreteObstaclesTerrainCfg,
+)
+from isaaclab.terrains.trimesh.mesh_terrains_cfg import (
+    MeshPlaneTerrainCfg,
+    MeshPyramidStairsTerrainCfg,
+    MeshInvertedPyramidStairsTerrainCfg,
+    MeshBoxTerrainCfg,
+    MeshRandomGridTerrainCfg,
+)
 from isaaclab.utils import configclass
 
 import isaaclab.envs.mdp as mdp
@@ -73,9 +86,25 @@ def imu_projected_gravity(env, sensor_cfg: SceneEntityCfg) -> torch.Tensor:
 ##
 
 def base_height_below_threshold(env, minimum_height: float, asset_cfg: SceneEntityCfg) -> torch.Tensor:
-    """Terminate if base height drops below minimum threshold."""
+    """Terminate if base height above local terrain drops below minimum threshold.
+    
+    Uses the terrain's env_origins to get the local ground height for each environment.
+    """
     asset = env.scene[asset_cfg.name]
-    return asset.data.root_pos_w[:, 2] < minimum_height
+    root_pos = asset.data.root_pos_w
+    
+    # Get terrain origin heights for each environment
+    if hasattr(env.scene, 'terrain') and env.scene.terrain is not None:
+        terrain = env.scene.terrain
+        if hasattr(terrain, 'env_origins'):
+            # env_origins contains (x, y, z) spawn position for each env
+            # The z component is the terrain height at that location
+            terrain_height = terrain.env_origins[:, 2]
+            height_above_terrain = root_pos[:, 2] - terrain_height
+            return height_above_terrain < minimum_height
+    
+    # Fallback to absolute height
+    return root_pos[:, 2] < minimum_height
 
 
 ##
@@ -171,6 +200,60 @@ QUADRUPED_CFG = ArticulationCfg(
 
 
 ##
+# Terrain Configuration
+##
+
+# Sub-terrains: each entry becomes a COLUMN in the terrain grid
+# Difficulty varies across ROWS (controlled by difficulty_range)
+TERRAIN_SUB_TERRAINS = {
+    # Column 0: Flat terrain - always flat regardless of difficulty
+    "flat": MeshPlaneTerrainCfg(
+        proportion=1.0,
+    ),
+    # Column 1: Random grid boxes - height increases with difficulty
+    "random_grid": MeshRandomGridTerrainCfg(
+        proportion=1.0,
+        grid_width=0.15,
+        grid_height_range=(0.01, 0.12),  # 1cm to 12cm box heights
+        platform_width=1.5,
+    ),
+    # Column 2: Pyramid stairs up - step height increases with difficulty
+    "pyramid_stairs_up": MeshPyramidStairsTerrainCfg(
+        proportion=1.0,
+        step_height_range=(0.01, 0.12),  # 1cm to 12cm steps
+        step_width=0.3,
+        platform_width=1.5,
+        border_width=0.1,
+        holes=False,
+    ),
+    # Column 3: Inverted pyramid stairs (going down into pit)
+    "pyramid_stairs_down": MeshInvertedPyramidStairsTerrainCfg(
+        proportion=1.0,
+        step_height_range=(0.01, 0.12),  # 1cm to 12cm depth
+        step_width=0.3,
+        platform_width=1.5,
+        border_width=0.1,
+        holes=False,
+    ),
+}
+
+
+TERRAIN_CFG = TerrainGeneratorCfg(
+    size=(8.0, 8.0),
+    border_width=0.25,
+    num_rows=5,   # 5 difficulty levels
+    num_cols=4,   # 4 terrain types (flat, grid, stairs up, stairs down)
+    horizontal_scale=0.1,
+    vertical_scale=0.005,
+    slope_threshold=0.75,
+    use_cache=False,
+    sub_terrains=TERRAIN_SUB_TERRAINS,
+    curriculum=True,  # Row 0 = easiest (diff=0), Row 4 = hardest (diff=1)
+    difficulty_range=(0.0, 1.0),
+)
+
+
+##
 # Scene Configuration
 ##
 
@@ -178,17 +261,19 @@ QUADRUPED_CFG = ArticulationCfg(
 class QuadrupedSceneCfg(InteractiveSceneCfg):
     """Configuration for quadruped scene."""
 
-    ground = AssetBaseCfg(
-        prim_path="/World/ground",
-        spawn=sim_utils.GroundPlaneCfg(
-            size=(100.0, 100.0),
-            physics_material=sim_utils.RigidBodyMaterialCfg(
-                static_friction=1.0,
-                dynamic_friction=1.0,
-                restitution=0.0,
-            ),
+    # Terrain instead of ground plane
+    terrain = TerrainImporterCfg(
+        prim_path="/World/terrain",
+        terrain_type="generator",
+        terrain_generator=TERRAIN_CFG,
+        max_init_terrain_level=0,  # All robots start on row 0 (easiest)
+        collision_group=-1,
+        physics_material=sim_utils.RigidBodyMaterialCfg(
+            static_friction=1.0,
+            dynamic_friction=1.0,
+            restitution=0.0,
         ),
-        init_state=AssetBaseCfg.InitialStateCfg(pos=(0.0, 0.0, 0.0)),
+        debug_vis=False,
     )
 
     robot: ArticulationCfg = QUADRUPED_CFG
@@ -317,11 +402,12 @@ class CommandsCfg:
 class EventCfg:
     """Configuration for events/randomization."""
 
+    # Reset robot on terrain
     reset_robot = EventTermCfg(
         func=mdp.reset_root_state_uniform,
         mode="reset",
         params={
-            "pose_range": {"x": (-0.0, 0.0), "y": (-0.0, 0.0), "yaw": (-0.0, 0.0)},
+            "pose_range": {"x": (-0.5, 0.5), "y": (-0.5, 0.5), "yaw": (-0.0, 0.0)},
             "velocity_range": {
                 "x": (0.0, 0.0),
                 "y": (0.0, 0.0),
@@ -443,7 +529,7 @@ class TerminationsCfg:
 class QuadrupedEnvCfg(ManagerBasedRLEnvCfg):
     """Configuration for quadruped locomotion environment."""
 
-    scene: QuadrupedSceneCfg = QuadrupedSceneCfg(num_envs=16384, env_spacing=2.0)
+    scene: QuadrupedSceneCfg = QuadrupedSceneCfg(num_envs=4096, env_spacing=2.5)
     observations: ObservationsCfg = ObservationsCfg()
     actions: ActionsCfg = ActionsCfg()
     commands: CommandsCfg = CommandsCfg()
@@ -457,8 +543,17 @@ class QuadrupedEnvCfg(ManagerBasedRLEnvCfg):
         self.sim.render_interval = 1
         self.decimation = 1
         self.episode_length_s = 10.0
-        self.viewer.eye = (3.0, 3.0, 2.0)
+        self.viewer.eye = (8.0, 8.0, 5.0)
         self.viewer.lookat = (0.0, 0.0, 0.0)
+        
+        # Increase PhysX GPU buffers for complex terrain collisions
+        self.sim.physx.gpu_found_lost_pairs_capacity = 2**24
+        self.sim.physx.gpu_found_lost_aggregate_pairs_capacity = 2**26
+        self.sim.physx.gpu_total_aggregate_pairs_capacity = 2**22
+        self.sim.physx.gpu_max_rigid_contact_count = 2**24
+        self.sim.physx.gpu_max_rigid_patch_count = 2**22  # Increased to handle 220k+ patches
+        self.sim.physx.gpu_heap_capacity = 2**27
+        self.sim.physx.gpu_temp_buffer_capacity = 2**25
 
 
 ##
@@ -471,12 +566,13 @@ class TrainCfg:
 
     experiment_name: str = "quadruped_walking"
     run_name: str = ""
-    max_iterations: int = 150
+    max_iterations: int = 200
     save_interval: int = 50
     log_interval: int = 1
     seed: int = 42
     num_steps_per_env: int = 24
     empirical_normalization: bool = False
+    headless: bool = True
 
     obs_groups: dict = field(default_factory=lambda: {
         "policy": ["policy"],
@@ -507,8 +603,14 @@ class TrainCfg:
         "init_noise_std": 0.5,
     })
 
-    # Curriculum learning configuration
-    curriculum_thresholds: list = field(default_factory=lambda: [0, 50, 100])
+    # Terrain curriculum configuration
+    terrain_curriculum_enabled: bool = True
+    terrain_curriculum_survival_threshold: float = 0.7  # Survive 70% of max episode
+    terrain_curriculum_velocity_threshold: float = 0.2  # Within 20% of commanded velocity
+    terrain_curriculum_update_freq: int = 50  # Steps between curriculum updates
+
+    # Curriculum learning configuration (reward-based)
+    curriculum_thresholds: list = field(default_factory=lambda: [0, 100, 200])
 
     curriculum_rewards: dict = field(default_factory=lambda: {
         "track_lin_vel_xy_exp": [20.0, 20.0, 20.0],
