@@ -14,10 +14,17 @@ RECORD_VIDEO = True  # Enable video recording via frame capture
 VIDEO_DIR = "logs/quadruped_walking/videos"
 FRAMES_DIR = "logs/quadruped_walking/frames"
 VIDEO_FPS = 30
-NUM_ENVS = 16
-NUM_EPISODES = 32
+NUM_ENVS = 36  # 6 rows x 3 cols = 18 subterrains, one robot per cell
 EXPERIMENT_NAME = "quadruped_walking"
-CHECKPOINT = "model_199.pt"
+CHECKPOINT = "model_499.pt"
+
+# Camera pan configuration
+CAMERA_PAN_DURATION = 10.0  # Duration of camera pan in seconds
+CAMERA_HEIGHT = 5.0  # Height above terrain
+CAMERA_LOOK_AHEAD = 15.0  # Distance ahead to look (larger = shallower angle)
+CAMERA_TARGET_HEIGHT = 0.0  # Height of look-at target above ground
+SPOTLIGHT_HEIGHT = 15.0  # Height of overhead spotlight
+SPOTLIGHT_INTENSITY = 5000.0  # Spotlight intensity
 
 from isaaclab.app import AppLauncher
 
@@ -37,7 +44,7 @@ import math
 from isaaclab.envs import ManagerBasedRLEnv
 from rsl_rl.modules import ActorCritic
 
-from configs import QuadrupedEnvCfg
+from rl_cfg import QuadrupedEnvCfg
 from quadruped_env import IsaacLabVecEnvWrapper
 
 
@@ -93,6 +100,244 @@ def frames_to_video(frames_dir: str, output_path: str, fps: int = 30):
         return False
 
 
+def get_terrain_bounds(env):
+    """Get the bounds and cell info of the subterrain grid (excluding border)."""
+    isaac_env = env.unwrapped
+    
+    # Default values
+    cell_size = (8.0, 8.0)
+    num_rows = 6
+    num_cols = 3
+    
+    if hasattr(isaac_env.scene, 'terrain') and isaac_env.scene.terrain is not None:
+        terrain = isaac_env.scene.terrain
+        if hasattr(terrain, 'cfg') and hasattr(terrain.cfg, 'terrain_generator'):
+            gen_cfg = terrain.cfg.terrain_generator
+            if hasattr(gen_cfg, 'size'):
+                cell_size = gen_cfg.size
+            if hasattr(gen_cfg, 'num_rows'):
+                num_rows = gen_cfg.num_rows
+            if hasattr(gen_cfg, 'num_cols'):
+                num_cols = gen_cfg.num_cols
+    
+    # Calculate the actual subterrain grid size (without border)
+    grid_width = cell_size[0] * num_cols
+    grid_height = cell_size[1] * num_rows
+    
+    # The subterrain grid is centered at origin
+    return {
+        "min_x": -grid_width / 2,
+        "max_x": grid_width / 2,
+        "min_y": -grid_height / 2,
+        "max_y": grid_height / 2,
+        "cell_size": cell_size,
+        "num_rows": num_rows,
+        "num_cols": num_cols,
+    }
+
+
+def setup_camera_pan(env, duration: float, height: float, look_ahead: float, target_height: float):
+    """Setup camera pan parameters.
+    
+    Camera pans diagonally across the terrain grid, from the first subterrain
+    cell to the last, keeping a fixed look direction to avoid rotation.
+    """
+    isaac_env = env.unwrapped
+    terrain = isaac_env.scene.terrain
+    
+    # Get actual terrain cell origins from the terrain object
+    if hasattr(terrain, 'terrain_origins'):
+        origins = terrain.terrain_origins  # Shape: (num_rows, num_cols, 3)
+        
+        # First cell is at [0, 0], last cell is at [num_rows-1, num_cols-1]
+        first_cell = origins[0, 0].cpu().numpy()
+        last_cell = origins[-1, -1].cpu().numpy()
+        
+        first_cell_x = float(first_cell[0])
+        first_cell_y = float(first_cell[1])
+        last_cell_x = float(last_cell[0])
+        last_cell_y = float(last_cell[1])
+        
+        print(f"First cell origin: ({first_cell_x:.1f}, {first_cell_y:.1f})")
+        print(f"Last cell origin: ({last_cell_x:.1f}, {last_cell_y:.1f})")
+    else:
+        # Fallback to calculated positions
+        bounds = get_terrain_bounds(env)
+        cell_w = bounds["cell_size"][0]
+        cell_h = bounds["cell_size"][1]
+        first_cell_x = bounds["min_x"] + cell_w / 2
+        first_cell_y = bounds["min_y"] + cell_h / 2
+        last_cell_x = bounds["max_x"] - cell_w / 2
+        last_cell_y = bounds["max_y"] - cell_h / 2
+    
+    # Calculate diagonal direction from first to last cell (normalized)
+    dx = last_cell_x - first_cell_x
+    dy = last_cell_y - first_cell_y
+    dist = math.sqrt(dx*dx + dy*dy)
+    if dist > 0.001:
+        dir_x = dx / dist
+        dir_y = dy / dist
+    else:
+        dir_x = 1.0
+        dir_y = 0.0
+    
+    # Start directly above first cell
+    start_pos = (first_cell_x, first_cell_y, height)
+    
+    # End position: stop before the last cell so it stays in view
+    # Pull back by the look_ahead distance so the last cell is centered in view at the end
+    end_pos = (
+        last_cell_x - dir_x * look_ahead,
+        last_cell_y - dir_y * look_ahead,
+        height
+    )
+    
+    return {
+        "start_pos": start_pos,
+        "end_pos": end_pos,
+        "look_dir": (dir_x, dir_y),
+        "look_ahead": look_ahead,
+        "target_height": target_height,
+        "duration": duration,
+        "height": height,
+    }
+
+
+def set_camera_view(isaac_env, eye: tuple, target: tuple):
+    """Set camera position and look-at target using Isaac Lab's sim API."""
+    try:
+        import numpy as np
+        cam_eye = np.array(eye, dtype=float)
+        cam_target = np.array(target, dtype=float)
+        isaac_env.sim.set_camera_view(eye=cam_eye, target=cam_target)
+        return True
+    except Exception as e:
+        if not hasattr(set_camera_view, '_error_count'):
+            set_camera_view._error_count = 0
+        set_camera_view._error_count += 1
+        if set_camera_view._error_count <= 3:
+            print(f"Warning: Could not set camera view: {e}")
+        return False
+
+
+def update_camera(isaac_env, pan_config: dict, progress: float):
+    """Update camera position based on pan progress (0.0 to 1.0)."""
+    start = pan_config["start_pos"]
+    end = pan_config["end_pos"]
+    look_dir = pan_config["look_dir"]
+    look_ahead = pan_config["look_ahead"]
+    target_height = pan_config.get("target_height", 0.0)
+    
+    # Interpolate eye position along the diagonal
+    eye_x = start[0] + (end[0] - start[0]) * progress
+    eye_y = start[1] + (end[1] - start[1]) * progress
+    eye_z = pan_config["height"]
+    
+    # Target is a fixed distance ahead in the direction of travel
+    target_x = eye_x + look_dir[0] * look_ahead
+    target_y = eye_y + look_dir[1] * look_ahead
+    target_z = target_height
+    
+    set_camera_view(
+        isaac_env,
+        eye=(eye_x, eye_y, eye_z),
+        target=(target_x, target_y, target_z)
+    )
+
+
+def create_spotlight(isaac_env):
+    """Create an overhead spotlight that can be moved during evaluation."""
+    try:
+        import omni.usd
+        from pxr import UsdLux, Gf, Sdf
+        
+        stage = omni.usd.get_context().get_stage()
+        
+        # Create a sphere light for soft overhead illumination
+        light_path = "/World/eval_spotlight"
+        light_prim = stage.DefinePrim(light_path, "SphereLight")
+        
+        sphere_light = UsdLux.SphereLight(light_prim)
+        sphere_light.CreateIntensityAttr(SPOTLIGHT_INTENSITY)
+        sphere_light.CreateRadiusAttr(2.0)
+        sphere_light.CreateColorAttr(Gf.Vec3f(1.0, 0.95, 0.9))  # Slightly warm white
+        
+        # Enable shadow casting
+        sphere_light.CreateEnableColorTemperatureAttr(False)
+        
+        print(f"Created overhead spotlight at {light_path}")
+        return light_path
+    except Exception as e:
+        print(f"Warning: Could not create spotlight: {e}")
+        return None
+
+
+def update_spotlight(light_path: str, x: float, y: float, height: float):
+    """Update spotlight position to follow the camera."""
+    try:
+        import omni.usd
+        from pxr import Gf, UsdGeom
+        
+        stage = omni.usd.get_context().get_stage()
+        light_prim = stage.GetPrimAtPath(light_path)
+        
+        if light_prim and light_prim.IsValid():
+            xformable = UsdGeom.Xformable(light_prim)
+            
+            # Clear and set transform
+            xformable.ClearXformOpOrder()
+            translate_op = xformable.AddTranslateOp()
+            translate_op.Set(Gf.Vec3d(x, y, height))
+            
+    except Exception as e:
+        pass  # Silently ignore spotlight update errors
+
+
+def distribute_robots_across_terrain(isaac_env, num_rows: int, num_cols: int):
+    """Manually set terrain indices to distribute robots evenly across all cells."""
+    num_cells = num_rows * num_cols
+    num_envs = isaac_env.num_envs
+    
+    terrain = isaac_env.scene.terrain
+    if terrain is None:
+        print("Warning: No terrain found")
+        return False
+    
+    device = isaac_env.device
+    
+    # Create indices for each cell (row-major order)
+    terrain_levels = torch.zeros(num_envs, dtype=torch.long, device=device)
+    terrain_types = torch.zeros(num_envs, dtype=torch.long, device=device)
+    
+    for env_idx in range(min(num_envs, num_cells)):
+        row = env_idx // num_cols
+        col = env_idx % num_cols
+        terrain_levels[env_idx] = row
+        terrain_types[env_idx] = col
+    
+    # Handle extra environments if any
+    for env_idx in range(num_cells, num_envs):
+        row = env_idx % num_rows
+        col = env_idx % num_cols
+        terrain_levels[env_idx] = row
+        terrain_types[env_idx] = col
+    
+    # Assign terrain levels and types
+    terrain.terrain_levels = terrain_levels
+    terrain.terrain_types = terrain_types
+    
+    # Recompute env_origins based on terrain assignments
+    if hasattr(terrain, 'terrain_origins'):
+        for env_idx in range(num_envs):
+            row = terrain_levels[env_idx].item()
+            col = terrain_types[env_idx].item()
+            if row < terrain.terrain_origins.shape[0] and col < terrain.terrain_origins.shape[1]:
+                terrain.env_origins[env_idx] = terrain.terrain_origins[row, col]
+    
+    print(f"Distributed {num_envs} robots across {num_rows}x{num_cols} terrain grid")
+    return True
+
+
 def evaluate():
     """Evaluate trained policy."""
     
@@ -101,37 +346,80 @@ def evaluate():
     if not os.path.exists(log_dir):
         raise ValueError(f"Log directory {log_dir} not found")
     
+    # Find checkpoint - use specified or find latest
     checkpoint_path = f"{log_dir}/{CHECKPOINT}"
     if not os.path.exists(checkpoint_path):
-        raise ValueError(f"Checkpoint {checkpoint_path} not found")
+        checkpoints = [f for f in os.listdir(log_dir) if f.startswith("model_") and f.endswith(".pt")]
+        if checkpoints:
+            checkpoints.sort(key=lambda x: int(x.replace("model_", "").replace(".pt", "")))
+            checkpoint_path = f"{log_dir}/{checkpoints[-1]}"
+            print(f"Specified checkpoint not found, using latest: {checkpoints[-1]}")
+        else:
+            raise ValueError(f"No checkpoints found in {log_dir}. Run training first.")
     
-    # Create environment with fewer envs for evaluation
+    # Create environment with one robot per subterrain cell
     env_cfg = QuadrupedEnvCfg()
-    env_cfg.scene.num_envs = NUM_ENVS
+    
+    # Get terrain grid dimensions
+    terrain_cfg = env_cfg.scene.terrain.terrain_generator
+    num_rows = terrain_cfg.num_rows
+    num_cols = terrain_cfg.num_cols
+    num_cells = num_rows * num_cols
+    
+    # Set num_envs to match terrain grid (one robot per cell)
+    env_cfg.scene.num_envs = num_cells
+    
+    # Disable curriculum - use random difficulty for each subterrain
+    terrain_cfg.curriculum = False
+    
+    # Allow spawning across all terrain levels
+    env_cfg.scene.terrain.max_init_terrain_level = num_rows - 1
     
     print("\n" + "=" * 80)
     print("QUADRUPED POLICY EVALUATION")
     print("=" * 80)
     print(f"Log directory: {log_dir}")
-    print(f"Checkpoint: {CHECKPOINT}")
-    print(f"Num environments: {NUM_ENVS}")
-    print(f"Num episodes: {NUM_EPISODES}")
+    print(f"Checkpoint: {checkpoint_path}")
+    print(f"Terrain grid: {num_rows} rows x {num_cols} cols = {num_cells} cells")
+    print(f"Terrain mode: Random (non-curriculum)")
+    print(f"Num environments: {num_cells} (one per subterrain)")
+    print(f"Camera pan duration: {CAMERA_PAN_DURATION}s")
     print(f"Headless: {HEADLESS}")
     print(f"Record video: {RECORD_VIDEO}")
     print("=" * 80 + "\n")
     
     # Create environment
     isaac_env = ManagerBasedRLEnv(cfg=env_cfg)
+    
+    # Distribute robots evenly across terrain BEFORE wrapping
+    distribute_robots_across_terrain(isaac_env, num_rows, num_cols)
+    
+    # Wrap for RSL-RL
     env = IsaacLabVecEnvWrapper(isaac_env)
     
     # Setup frame capture
     viewport = None
-    if RECORD_VIDEO:
+    if RECORD_VIDEO or not HEADLESS:
         os.makedirs(VIDEO_DIR, exist_ok=True)
         os.makedirs(FRAMES_DIR, exist_ok=True)
         viewport = setup_frame_capture()
         if viewport is not None:
             print(f"Frame capture enabled, saving to {FRAMES_DIR}")
+    
+    # Setup camera pan
+    pan_config = setup_camera_pan(env, CAMERA_PAN_DURATION, CAMERA_HEIGHT, CAMERA_LOOK_AHEAD, CAMERA_TARGET_HEIGHT)
+    print(f"Camera pan: {pan_config['start_pos']} -> {pan_config['end_pos']}")
+    
+    # Create overhead spotlight
+    spotlight_path = create_spotlight(isaac_env)
+    
+    # Initialize camera to starting position and let it settle
+    print("Initializing camera position...")
+    update_camera(isaac_env, pan_config, 0.0)
+    if spotlight_path:
+        update_spotlight(spotlight_path, pan_config["start_pos"][0], pan_config["start_pos"][1], SPOTLIGHT_HEIGHT)
+    for _ in range(60):
+        simulation_app.update()
     
     # Load checkpoint
     print(f"Loading checkpoint: {checkpoint_path}")
@@ -185,18 +473,9 @@ def evaluate():
     
     policy.eval()
     print("Policy loaded successfully\n")
-    
-    # Track termination reasons
-    termination_counts = {
-        "time_out": 0,
-        "bad_orientation": 0,
-        "base_height_low": 0,
-        "illegal_contact": 0,
-        "total_resets": 0,
-    }
 
-    # Evaluation loop
-    print("Running evaluation...")
+    # Evaluation loop - run until camera pan completes
+    print("Running evaluation with camera pan...")
     if not HEADLESS:
         print("Live visualization enabled - watch the simulator window")
     print("Press Ctrl+C to stop\n")
@@ -207,10 +486,13 @@ def evaluate():
     completed_episodes = 0
     step_count = 0
     frame_count = 0
-    episode_start_frame = 0
+    
+    # Calculate total steps for camera pan
+    sim_dt = env_cfg.sim.dt
+    total_pan_steps = int(CAMERA_PAN_DURATION / sim_dt)
     
     # Frame skip to achieve target FPS
-    sim_fps = 1.0 / env_cfg.sim.dt
+    sim_fps = 1.0 / sim_dt
     frame_skip = max(1, int(sim_fps / VIDEO_FPS))
     
     all_episode_rewards = []
@@ -226,11 +508,23 @@ def evaluate():
     }
     
     try:
-        while completed_episodes < NUM_EPISODES:
+        while step_count < total_pan_steps:
             with torch.no_grad():
                 actions = policy.act_inference(obs_dict)
             
             obs_dict, rewards, dones, extras = env.step(actions)
+            
+            # Update camera position every step
+            pan_progress = step_count / total_pan_steps
+            update_camera(isaac_env, pan_config, pan_progress)
+            
+            # Update spotlight to follow camera
+            if spotlight_path:
+                start = pan_config["start_pos"]
+                end = pan_config["end_pos"]
+                light_x = start[0] + (end[0] - start[0]) * pan_progress
+                light_y = start[1] + (end[1] - start[1]) * pan_progress
+                update_spotlight(spotlight_path, light_x, light_y, SPOTLIGHT_HEIGHT)
             
             # Capture frame for video
             if RECORD_VIDEO and viewport is not None:
@@ -243,59 +537,37 @@ def evaluate():
             episode_lengths += 1
             step_count += 1
             
-            # Debug termination reasons when episodes end
+            # Print progress every 10%
+            if step_count % (total_pan_steps // 10) == 0:
+                progress_pct = 100.0 * step_count / total_pan_steps
+                print(f"  Progress: {progress_pct:.0f}% ({step_count}/{total_pan_steps} steps)")
+            
+            # Handle completed episodes
             if dones.any():
                 done_indices = dones.nonzero(as_tuple=False).squeeze(-1)
                 if done_indices.dim() == 0:
                     done_indices = done_indices.unsqueeze(0)
                 
-                # Get termination info from Isaac Lab environment
-                isaac_env = env.unwrapped
-                robot = isaac_env.scene["robot"]
-                
-                # Get body names for contact sensor
-                contact_sensor = isaac_env.scene.sensors["contact_forces"]
-                body_names = []
-                if hasattr(contact_sensor, 'body_names'):
-                    body_names = contact_sensor.body_names
-                elif hasattr(contact_sensor, 'cfg') and hasattr(contact_sensor.cfg, 'prim_path'):
-                    # Try to extract from prim path pattern
-                    body_names = [f"body_{i}" for i in range(contact_sensor.data.net_forces_w.shape[1])]
+                isaac_env_inner = env.unwrapped
+                robot = isaac_env_inner.scene["robot"]
                 
                 for idx in done_indices:
                     idx_item = idx.item()
                     
-                    # Check each termination condition manually
                     height = robot.data.root_pos_w[idx_item, 2].item()
                     quat = robot.data.root_quat_w[idx_item]
                     w = quat[0].item()
                     
-                    # Get terrain height for relative height calculation
                     terrain_height = 0.0
-                    if hasattr(isaac_env.scene, 'terrain') and isaac_env.scene.terrain is not None:
-                        terrain = isaac_env.scene.terrain
+                    if hasattr(isaac_env_inner.scene, 'terrain') and isaac_env_inner.scene.terrain is not None:
+                        terrain = isaac_env_inner.scene.terrain
                         if hasattr(terrain, 'env_origins'):
                             terrain_height = terrain.env_origins[idx_item, 2].item()
                     height_above_terrain = height - terrain_height
                     
-                    # Compute tilt angle from quaternion w component
                     tilt_angle = 2.0 * math.acos(min(abs(w), 1.0))
                     tilt_deg = math.degrees(tilt_angle)
                     
-                    # Check contact forces and identify which bodies
-                    forces = contact_sensor.data.net_forces_w[idx_item]
-                    force_mags = torch.norm(forces, dim=-1)
-                    max_force = force_mags.max().item()
-                    
-                    # Find bodies with contact force above threshold
-                    contact_threshold = 10.0
-                    contacting_bodies = []
-                    for body_idx, force_mag in enumerate(force_mags):
-                        if force_mag.item() > contact_threshold:
-                            body_name = body_names[body_idx] if body_idx < len(body_names) else f"body_{body_idx}"
-                            contacting_bodies.append((body_name, force_mag.item()))
-                    
-                    # Determine termination reason
                     reason = "unknown"
                     if episode_lengths[idx_item].item() >= env.max_episode_length:
                         reason = "time_out"
@@ -303,26 +575,9 @@ def evaluate():
                         reason = "base_height_low"
                     elif tilt_deg > 45.0:
                         reason = "bad_orientation"
-                    elif max_force > contact_threshold:
-                        reason = "illegal_contact"
                     
                     termination_counts[reason] += 1
-                    
-                    # Print debug info for all non-timeout terminations
-                    if reason != "time_out":
-                        print(f"\n  TERMINATION DEBUG (Episode {completed_episodes + 1}):")
-                        print(f"    Reason: {reason}")
-                        print(f"    Height above terrain: {height_above_terrain:.3f}m (threshold: 0.1m)")
-                        print(f"    World height: {height:.3f}m, Terrain height: {terrain_height:.3f}m")
-                        print(f"    Tilt: {tilt_deg:.1f} deg (threshold: 45 deg)")
-                        print(f"    Max contact force: {max_force:.1f}N (threshold: {contact_threshold}N)")
-                        if contacting_bodies:
-                            print(f"    Bodies in contact:")
-                            for body_name, force in contacting_bodies:
-                                print(f"      - {body_name}: {force:.1f}N")
-                        print(f"    Episode length: {episode_lengths[idx_item].item():.0f} steps")
                 
-                # Record completed episodes
                 for idx in done_indices:
                     completed_episodes += 1
                     ep_reward = episode_rewards[idx].item()
@@ -330,16 +585,6 @@ def evaluate():
                     
                     all_episode_rewards.append(ep_reward)
                     all_episode_lengths.append(ep_length)
-                    
-                    print(f"Episode {completed_episodes}: "
-                          f"Reward = {ep_reward:.2f}, "
-                          f"Length = {ep_length:.0f}, "
-                          f"Frames = {frame_count - episode_start_frame}")
-                    
-                    episode_start_frame = frame_count
-                    
-                    if completed_episodes >= NUM_EPISODES:
-                        break
                 
                 episode_rewards[done_indices] = 0
                 episode_lengths[done_indices] = 0
@@ -363,7 +608,6 @@ def evaluate():
         print(f"\nCaptured {frame_count} frames")
         video_path = os.path.join(VIDEO_DIR, "evaluation.mp4")
         if frames_to_video(FRAMES_DIR, video_path, VIDEO_FPS):
-            # Clean up frames directory
             print(f"Cleaning up frames directory...")
             shutil.rmtree(FRAMES_DIR)
             os.makedirs(FRAMES_DIR, exist_ok=True)
@@ -372,6 +616,8 @@ def evaluate():
     print("\n" + "=" * 80)
     print("EVALUATION SUMMARY")
     print("=" * 80)
+    print(f"Total simulation time: {step_count * sim_dt:.1f}s")
+    print(f"Total steps: {step_count}")
     if len(all_episode_rewards) > 0:
         print(f"Episodes completed: {len(all_episode_rewards)}")
         print(f"Mean reward: {np.mean(all_episode_rewards):.2f} +/- {np.std(all_episode_rewards):.2f}")

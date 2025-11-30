@@ -41,6 +41,13 @@ class IsaacLabVecEnvWrapper(VecEnv):
         self._nan_obs_count = 0
         self._nan_reward_count = 0
         
+        # Completed episodes buffer for curriculum
+        self._completed_episodes = []
+        
+        # Episode tracking
+        self.episode_rewards_sum = torch.zeros(self.num_envs, device=self.device)
+        self.episode_steps = torch.zeros(self.num_envs, device=self.device)
+        
         # Terrain curriculum tracking
         self._setup_terrain_curriculum()
         
@@ -51,15 +58,6 @@ class IsaacLabVecEnvWrapper(VecEnv):
         """Setup terrain curriculum tracking buffers."""
         # Per-environment terrain level tracking
         self.terrain_levels = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
-        self.terrain_types = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
-        
-        # Episode performance tracking for curriculum
-        self.episode_rewards_sum = torch.zeros(self.num_envs, device=self.device)
-        self.episode_steps = torch.zeros(self.num_envs, device=self.device)
-        
-        # Velocity tracking for curriculum
-        self.episode_vel_error_sum = torch.zeros(self.num_envs, device=self.device)
-        self.episode_vel_cmd_sum = torch.zeros(self.num_envs, device=self.device)
         
         # Get terrain info if available
         self.num_terrain_rows = 5  # Default
@@ -76,63 +74,54 @@ class IsaacLabVecEnvWrapper(VecEnv):
                 if hasattr(gen_cfg, 'num_cols'):
                     self.num_terrain_cols = gen_cfg.num_cols
 
-    def _get_velocity_tracking_error(self):
-        """Compute current velocity tracking error."""
-        try:
-            # Get commanded velocity
-            cmd_vel = self._env.command_manager.get_command("base_velocity")
-            cmd_vel_x = cmd_vel[:, 0]  # Forward velocity command
-            
-            # Get actual velocity
-            robot = self._env.scene["robot"]
-            actual_vel = robot.data.root_lin_vel_b[:, 0]  # Forward velocity in body frame
-            
-            # Compute absolute error
-            vel_error = torch.abs(actual_vel - cmd_vel_x)
-            cmd_magnitude = torch.abs(cmd_vel_x).clamp(min=0.1)  # Avoid division by zero
-            
-            return vel_error, cmd_magnitude
-        except Exception:
-            # Fallback if velocity data unavailable
-            return torch.zeros(self.num_envs, device=self.device), torch.ones(self.num_envs, device=self.device)
-
-    def update_terrain_curriculum(self, survival_threshold: float = 0.7, velocity_threshold: float = 0.2):
+    def set_terrain_level_for_stage(self, stage: int, num_stages: int) -> int:
         """
-        Update terrain levels based on episode performance.
+        Set terrain level based on curriculum stage.
+        
+        Maps curriculum stage to terrain difficulty row.
+        Stage 0 -> Row 0 (easiest), Stage N-1 -> Row max_level (hardest)
         
         Args:
-            survival_threshold: Fraction of max episode length to survive (0-1).
-            velocity_threshold: Max relative velocity error to pass (0-1, e.g., 0.2 = within 20%).
+            stage: Current curriculum stage (0 to num_stages-1)
+            num_stages: Total number of curriculum stages
+            
+        Returns:
+            The terrain level that was set
         """
-        # Compute survival metric
-        max_steps = self.max_episode_length
-        survival_rate = self.episode_steps / max_steps
+        # Map stage to terrain level
+        if num_stages <= 1:
+            target_level = 0
+        else:
+            # Linear mapping from stage to terrain level
+            target_level = int((stage / (num_stages - 1)) * self.max_terrain_level)
         
-        # Compute velocity tracking metric (relative error)
-        # Avoid division by zero with clamp
-        vel_error_rate = self.episode_vel_error_sum / self.episode_vel_cmd_sum.clamp(min=1.0)
+        target_level = min(target_level, self.max_terrain_level)
         
-        # Find environments that just finished episodes (have accumulated steps)
-        finished = self.episode_steps > 10  # Need at least some steps
+        # Set all environments to this terrain level
+        self.terrain_levels.fill_(target_level)
         
-        if not finished.any():
-            return
+        # Update terrain importer's max level if possible
+        if hasattr(self._env, 'scene') and hasattr(self._env.scene, 'terrain'):
+            terrain = self._env.scene.terrain
+            if hasattr(terrain, 'cfg'):
+                terrain.cfg.max_init_terrain_level = target_level
         
-        # Promote: survived long enough AND tracked velocity well
-        promote_mask = finished & (survival_rate >= survival_threshold) & (vel_error_rate <= velocity_threshold)
+        return target_level
+
+    def get_terrain_levels(self) -> torch.Tensor:
+        """Get current terrain levels for all environments."""
+        return self.terrain_levels
+
+    def get_completed_episodes(self):
+        """
+        Get list of completed episodes with their rewards and lengths.
         
-        # Demote: poor survival OR very poor velocity tracking
-        demote_mask = finished & ((survival_rate < survival_threshold * 0.5) | (vel_error_rate > velocity_threshold * 2.0))
-        
-        # Update terrain levels
-        self.terrain_levels[promote_mask] = torch.clamp(
-            self.terrain_levels[promote_mask] + 1, 
-            max=self.max_terrain_level
-        )
-        self.terrain_levels[demote_mask] = torch.clamp(
-            self.terrain_levels[demote_mask] - 1, 
-            min=0
-        )
+        Returns:
+            List of (reward, length) tuples for episodes that completed this step.
+        """
+        completed = self._completed_episodes.copy()
+        self._completed_episodes.clear()
+        return completed
 
     def reset(self):
         """Reset all environments."""
@@ -162,23 +151,26 @@ class IsaacLabVecEnvWrapper(VecEnv):
         # Combine terminated and truncated for RSL-RL
         dones = terminated | truncated
         
-        # Track episode performance for terrain curriculum
+        # Track episode performance
         self.episode_rewards_sum += rewards.squeeze() if rewards.dim() > 1 else rewards
         self.episode_steps += 1
         
-        # Track velocity error for curriculum
-        vel_error, cmd_magnitude = self._get_velocity_tracking_error()
-        self.episode_vel_error_sum += vel_error
-        self.episode_vel_cmd_sum += cmd_magnitude
-        
-        # Reset phase and episode tracking for terminated envs
+        # Handle completed episodes
         if dones.any():
+            # Record completed episodes before resetting
+            done_indices = dones.nonzero(as_tuple=False).squeeze(-1)
+            if done_indices.dim() == 0:
+                done_indices = done_indices.unsqueeze(0)
+            
+            for idx in done_indices:
+                idx_item = idx.item()
+                ep_reward = self.episode_rewards_sum[idx_item].item()
+                ep_length = self.episode_steps[idx_item].item()
+                self._completed_episodes.append((ep_reward, ep_length))
+            
             self.phase[dones] = 0.0
-            # Reset episode tracking for done envs (after curriculum update uses them)
             self.episode_rewards_sum[dones] = 0.0
             self.episode_steps[dones] = 0.0
-            self.episode_vel_error_sum[dones] = 0.0
-            self.episode_vel_cmd_sum[dones] = 0.0
         
         # Convert observations
         self._last_obs = self._convert_obs(obs_dict)
