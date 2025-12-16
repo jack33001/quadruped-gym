@@ -22,6 +22,11 @@ from sim_cfg import (
     foot_slip_penalty,
     distance_traveled_reward,
     leg_contact_penalty,
+    heading_tracking_reward,
+    store_initial_heading,
+    foot_air_time_reward,
+    foot_step_height_reward,
+    default_pose_reward,
 )
 
 
@@ -124,7 +129,7 @@ class EventCfg:
         func=mdp.reset_root_state_uniform,
         mode="reset",
         params={
-            "pose_range": {"x": (-0.5, 0.5), "y": (-0.5, 0.5), "yaw": (-0.0, 0.0)},
+            "pose_range": {"x": (-0.5, 0.5), "y": (-0.5, 0.5), "yaw": (-3.14159, 3.14159)},
             "velocity_range": {
                 "x": (0.0, 0.0),
                 "y": (0.0, 0.0),
@@ -145,6 +150,15 @@ class EventCfg:
         },
     )
 
+    # Store initial heading after reset for heading tracking reward
+    store_heading = EventTermCfg(
+        func=store_initial_heading,
+        mode="reset",
+        params={
+            "asset_cfg": SceneEntityCfg("robot"),
+        },
+    )
+
 
 ##
 # Reward Configuration
@@ -159,45 +173,55 @@ class RewardsCfg:
     """
 
     # Reward for matching commanded forward/lateral velocity
-    track_lin_vel_xy_exp = RewardTermCfg(
+    cmd_lin_vel_tracking = RewardTermCfg(
         func=mdp.track_lin_vel_xy_exp,
         weight=0.0,  # Set by curriculum
         params={"command_name": "base_velocity", "std": 0.05},
     )
 
-    # Reward for matching commanded turning rate
-    track_ang_vel_z_exp = RewardTermCfg(
+    # Reward for matching commanded yaw rate (turning)
+    cmd_yaw_rate_tracking = RewardTermCfg(
         func=mdp.track_ang_vel_z_exp,
         weight=0.0,  # Set by curriculum
         params={"command_name": "base_velocity", "std": 0.05},
     )
 
-    # Punish roll/pitch angular velocity (wobbling)
-    ang_vel_xy_l2 = RewardTermCfg(
+    # Reward for maintaining initial heading orientation
+    heading_tracking = RewardTermCfg(
+        func=heading_tracking_reward,
+        weight=0.0,  # Set by curriculum
+        params={
+            "asset_cfg": SceneEntityCfg("robot"),
+            "std": 0.25,
+        },
+    )
+
+    # Penalize roll and pitch angular velocity (wobbling)
+    roll_pitch_rate_penalty = RewardTermCfg(
         func=mdp.ang_vel_xy_l2,
         weight=0.0,  # Set by curriculum
     )
 
-    # Punish vertical bouncing
-    lin_vel_z_l2 = RewardTermCfg(
+    # Penalize vertical velocity (bouncing)
+    vertical_vel_penalty = RewardTermCfg(
         func=mdp.lin_vel_z_l2,
         weight=0.0,  # Set by curriculum
     )
 
-    # Punish jerky/rapid action changes
-    action_rate_l2 = RewardTermCfg(
+    # Penalize jerky/rapid action changes
+    action_smoothness_penalty = RewardTermCfg(
         func=mdp.action_rate_l2,
         weight=0.0,  # Set by curriculum
     )
 
-    # Punish tilting away from upright orientation
-    flat_orientation_l2 = RewardTermCfg(
+    # Penalize roll and pitch deviation from upright
+    roll_pitch_orientation_penalty = RewardTermCfg(
         func=mdp.flat_orientation_l2,
         weight=0.0,  # Set by curriculum
     )
 
-    # Punish feet sliding on ground while in contact
-    foot_slip = RewardTermCfg(
+    # Penalize feet sliding on ground while in contact
+    foot_slip_penalty = RewardTermCfg(
         func=foot_slip_penalty,
         weight=0.0,  # Set by curriculum
         params={
@@ -208,7 +232,7 @@ class RewardsCfg:
     )
 
     # Reward for distance traveled (incentivizes walking far)
-    distance_traveled = RewardTermCfg(
+    distance_traveled_reward = RewardTermCfg(
         func=distance_traveled_reward,
         weight=0.0,  # Set by curriculum
         params={
@@ -217,13 +241,44 @@ class RewardsCfg:
     )
 
     # Penalize thigh and shin contacts with ground
-    leg_contact = RewardTermCfg(
+    leg_collision_penalty = RewardTermCfg(
         func=leg_contact_penalty,
         weight=0.0,  # Set by curriculum (should be negative)
         params={
             "thigh_sensor_cfg": SceneEntityCfg("thigh_contact"),
             "shin_sensor_cfg": SceneEntityCfg("shin_contact"),
             "threshold": 1.0,
+        },
+    )
+
+    # Reward for foot air time (encourages longer steps, discourages shuffling)
+    foot_air_time = RewardTermCfg(
+        func=foot_air_time_reward,
+        weight=0.0,  # Set by curriculum
+        params={
+            "sensor_cfg": SceneEntityCfg("foot_contact"),
+            "threshold": 0.0,
+        },
+    )
+
+    # Reward for lifting feet higher during swing phase
+    foot_step_height = RewardTermCfg(
+        func=foot_step_height_reward,
+        weight=0.0,  # Set by curriculum
+        params={
+            "sensor_cfg": SceneEntityCfg("foot_contact"),
+            "asset_cfg": SceneEntityCfg("robot"),
+            "target_height": 0.05,
+        },
+    )
+
+    # Reward for staying close to default joint positions
+    default_pose = RewardTermCfg(
+        func=default_pose_reward,
+        weight=0.0,  # Set by curriculum
+        params={
+            "asset_cfg": SceneEntityCfg("robot"),
+            "std": 0.5,
         },
     )
 
@@ -241,15 +296,6 @@ class TerminationsCfg:
     bad_orientation = TerminationTermCfg(
         func=mdp.bad_orientation,
         params={"limit_angle": math.radians(45.0)},
-    )
-
-    # Terminate if base height drops too low (fallen over)
-    base_height_low = TerminationTermCfg(
-        func=base_height_below_threshold,
-        params={
-            "minimum_height": 0.1,
-            "asset_cfg": SceneEntityCfg("robot"),
-        },
     )
 
     # Terminate if torso contacts the ground
@@ -307,7 +353,7 @@ class TrainCfg:
 
     experiment_name: str = "quadruped_walking"
     run_name: str = ""
-    max_iterations: int = 500
+    max_iterations: int = 400
     save_interval: int = 50
     log_interval: int = 1
     seed: int = 42
@@ -358,21 +404,26 @@ class TrainCfg:
     # Gradually increase tracking rewards and penalties across stages
     curriculum_rewards: dict = field(default_factory=lambda: {
         # Stage 0-5: Progressively stricter rewards
-        "track_lin_vel_xy_exp": [12.0, 15.0, 18.0, 21.0, 24.0, 27.0],
-        "track_ang_vel_z_exp": [0.05, 0.05, 0.05, 0.05, 0.05, 0.05],
-        "ang_vel_xy_l2": [-0.002, -0.005, -0.008, -0.012, -0.016, -0.02],
-        "lin_vel_z_l2": [-0.01, -0.02, -0.04, -0.06, -0.08, -0.1],
-        "action_rate_l2": [-0.0001, -0.0002, -0.0004, -0.0006, -0.0008, -0.001],
-        "flat_orientation_l2": [-0.01, -0.02, -0.04, -0.06, -0.08, -0.1],
-        "foot_slip": [0.0, 0.0, -0.005, -0.01, -0.015, -0.02],
-        "distance_traveled": [0.6, 0.5, 0.4, 0.3, 0.2, 0.1],
-        "leg_contact": [-0.002, -0.005, -0.008, -0.012, -0.016, -0.02],
+        "cmd_lin_vel_tracking": [20.0, 20.0, 20.0, 20.0, 20.0, 20.0],
+        "cmd_yaw_rate_tracking": [0.025, 0.025, 0.05, 0.05, 0.05, 0.05],
+        "heading_tracking": [-0.1, -.1, -0.1, -0.1, -0.1, -0.1],
+        "roll_pitch_rate_penalty": [-0.005, -0.005, -0.01, -0.01, -0.025, -0.025],
+        "roll_pitch_orientation_penalty": [-0.0, -0.0, -0.05, -0.05, -0.25, -0.25],
+        "vertical_vel_penalty": [-0.25, -0.25, -0.25, -0.25, -0.25, -0.25],
+        "action_smoothness_penalty": [-0.0005, -0.0005, -0.0005, -0.0005, -0.0005, -0.0005],
+        "foot_slip_penalty": [0.0, 0.0, -0.005, -0.005, -0.02, -0.02],
+        "distance_traveled_reward": [.5, .5, .5, .5, .5, .5],
+        "leg_collision_penalty": [-.01, -.01, -.01, -.01, -.01, -.01],
+        "foot_air_time": [0.0, 0.0, 0.05, 0.05, 0.1, 0.1],
+        "foot_step_height": [0.0, 0.0, 0.05, 0.05, 0.1, 0.1],
+        "default_pose": [0.01, 0.01, 0.05, 0.05, 0.1, 0.1],
     })
+
 
     # Command ranges per curriculum stage (6 stages)
     # Gradually increase velocity and turning demands
     curriculum_commands: dict = field(default_factory=lambda: {
-        "lin_vel_x": [(0.2, 0.4), (0.3, 0.5), (0.4, 0.6), (0.5, 0.7), (0.6, 0.8), (0.7, 1.0)],
-        "lin_vel_y": [(0.0, 0.0), (0.0, 0.0), (-0.1, 0.1), (-0.15, 0.15), (-0.2, 0.2), (-0.25, 0.25)],
-        "ang_vel_z": [(0.0, 0.0), (-0.1, 0.1), (-0.2, 0.2), (-0.3, 0.3), (-0.4, 0.4), (-0.5, 0.5)],
+        "lin_vel_x": [(0.3, 0.6), (0.3, 0.6), (0.3, 0.6), (0.3, 0.6), (0.3, 0.6), (0.3, 0.6)],
+        "lin_vel_y": [(0.0, 0.0), (0.0, 0.0), (0.0, 0.0), (0.0, 0.0), (0.0, 0.0), (0.0, 0.0)],
+        "ang_vel_z": [(0.0, 0.0), (0.0, 0.0), (0.0, 0.0), (0.0, 0.0), (0.0, 0.0), (0.0, 0.0)],
     })

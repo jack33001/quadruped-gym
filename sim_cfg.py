@@ -33,14 +33,14 @@ QUADRUPED_USD_PATH = os.path.join(QUADRUPED_GYM_DIR, "Quadruped URDF", "Quadrupe
 # Default joint positions matching Genesis config
 ##
 DEFAULT_JOINT_ANGLES = {
-    "Front_Right_Hip": -0.7,
-    "Front_Right_Knee": 0.0,
-    "Front_Left_Hip": 0.7,
-    "Front_Left_Knee": 0.0,
-    "Rear_Right_Hip": 0.7,
-    "Rear_Right_Knee": 0.0,
-    "Rear_Left_Hip": -0.7,
-    "Rear_Left_Knee": 0.0,
+    "Front_Right_Hip": -0.6,
+    "Front_Right_Knee": -0.2,
+    "Front_Left_Hip": 0.6,
+    "Front_Left_Knee": 0.2,
+    "Rear_Right_Hip": 0.6,
+    "Rear_Right_Knee": 0.2,
+    "Rear_Left_Hip": -0.6,
+    "Rear_Left_Knee": -0.2,
 }
 
 
@@ -225,6 +225,156 @@ def leg_contact_penalty(env, thigh_sensor_cfg: SceneEntityCfg, shin_sensor_cfg: 
     total_penalty += shin_penalty
     
     return total_penalty
+
+
+def heading_tracking_reward(env, asset_cfg: SceneEntityCfg, std: float = 0.25) -> torch.Tensor:
+    """Reward for maintaining the initial heading (yaw) orientation.
+    
+    Uses exponential kernel to reward small heading errors.
+    The target heading is stored per environment when reset occurs.
+    """
+    asset = env.scene[asset_cfg.name]
+    
+    # Get current quaternion (w, x, y, z)
+    quat = asset.data.root_quat_w
+    
+    # Extract yaw from quaternion
+    w, x, y, z = quat[:, 0], quat[:, 1], quat[:, 2], quat[:, 3]
+    current_yaw = torch.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+    
+    # Get target heading (stored during reset)
+    if not hasattr(env, '_target_heading'):
+        env._target_heading = current_yaw.clone()
+    
+    # Compute heading error (wrapped to [-pi, pi])
+    heading_error = current_yaw - env._target_heading
+    heading_error = torch.atan2(torch.sin(heading_error), torch.cos(heading_error))
+    
+    # Exponential reward kernel
+    reward = torch.exp(-heading_error.pow(2) / (std * std))
+    
+    return reward
+
+
+def foot_air_time_reward(env, sensor_cfg: SceneEntityCfg, threshold: float = 0.25) -> torch.Tensor:
+    """Reward feet for being in the air, with diminishing returns after threshold.
+    
+    Uses the formula (threshold - t_air) which:
+    - Gives positive reward when t_air < threshold (encourages longer steps)
+    - Gives negative reward when t_air > threshold (discourages excessively long steps)
+    - Peak reward at t_air = 0 transitioning to penalty after threshold
+    
+    This encourages moderate-duration steps rather than very short shuffling
+    or excessively long hang times.
+    """
+    contact_sensor = env.scene.sensors[sensor_cfg.name]
+    
+    # Get air time for each foot (time since last contact)
+    # air_time is (num_envs, num_feet)
+    air_time = contact_sensor.data.current_air_time
+    
+    # Compute reward: (threshold - air_time) for feet currently in air
+    # Positive when air_time < threshold, negative when > threshold
+    air_reward = threshold - air_time
+    
+    # Only count feet that are actually in the air (air_time > 0)
+    in_air = air_time > 0.0
+    
+    # Sum rewards across all feet, only for feet in air
+    total_reward = torch.sum(air_reward * in_air.float(), dim=-1)
+    
+    return total_reward
+
+
+def foot_step_height_reward(env, sensor_cfg: SceneEntityCfg, asset_cfg: SceneEntityCfg, target_height: float = 0.05) -> torch.Tensor:
+    """Reward feet for lifting higher during swing phase.
+    
+    Tracks the position where each foot lifted off the ground and rewards
+    height gained relative to that liftoff point. Uses exponential kernel
+    centered at target_height.
+    """
+    contact_sensor = env.scene.sensors[sensor_cfg.name]
+    asset = env.scene[asset_cfg.name]
+    
+    # Get contact forces to determine which feet are in air
+    contact_forces = contact_sensor.data.net_forces_w
+    num_feet = contact_forces.shape[1]
+    in_contact = torch.norm(contact_forces, dim=-1) > 1.0  # (num_envs, num_feet)
+    in_air = ~in_contact
+    
+    # Get foot positions in world frame
+    body_pos = asset.data.body_pos_w  # (num_envs, num_bodies, 3)
+    
+    # Get foot z positions (assuming feet are last N bodies)
+    if body_pos.shape[1] >= num_feet:
+        foot_pos_z = body_pos[:, -num_feet:, 2]  # (num_envs, num_feet)
+    else:
+        foot_pos_z = body_pos[:, :num_feet, 2]
+    
+    # Initialize liftoff tracking buffers if they don't exist
+    if not hasattr(env, '_foot_liftoff_z'):
+        env._foot_liftoff_z = foot_pos_z.clone()
+        env._foot_was_in_contact = in_contact.clone()
+    
+    # Detect feet that just lifted off (were in contact, now in air)
+    just_lifted = env._foot_was_in_contact & in_air
+    
+    # Update liftoff positions for feet that just lifted off
+    env._foot_liftoff_z = torch.where(just_lifted, foot_pos_z, env._foot_liftoff_z)
+    
+    # Compute height above liftoff point
+    height_above_liftoff = foot_pos_z - env._foot_liftoff_z  # (num_envs, num_feet)
+    
+    # Reward for being close to target height above liftoff (only for feet in air)
+    height_error = height_above_liftoff - target_height
+    height_reward = torch.exp(-height_error.pow(2) / (0.02 * 0.02))  # std = 2cm
+    
+    # Only reward feet that are in the air
+    total_reward = torch.sum(height_reward * in_air.float(), dim=-1)
+    
+    # Update contact state for next step
+    env._foot_was_in_contact = in_contact.clone()
+    
+    return total_reward
+
+
+def default_pose_reward(env, asset_cfg: SceneEntityCfg, std: float = 0.5) -> torch.Tensor:
+    """Reward for joint positions being close to default pose.
+    
+    Uses exponential kernel on the L2 norm of joint position error
+    relative to default positions.
+    """
+    asset = env.scene[asset_cfg.name]
+    
+    # Get current joint positions relative to default
+    joint_pos_error = asset.data.joint_pos - asset.data.default_joint_pos
+    
+    # Compute L2 norm of error across all joints
+    error_norm = torch.norm(joint_pos_error, dim=-1)
+    
+    # Exponential reward kernel
+    reward = torch.exp(-error_norm.pow(2) / (std * std))
+    
+    return reward
+
+
+def store_initial_heading(env, env_ids: torch.Tensor, asset_cfg: SceneEntityCfg):
+    """Event function to store initial heading after reset.
+    
+    Call this as a reset event to capture the randomized initial heading.
+    """
+    asset = env.scene[asset_cfg.name]
+    quat = asset.data.root_quat_w
+    
+    w, x, y, z = quat[:, 0], quat[:, 1], quat[:, 2], quat[:, 3]
+    current_yaw = torch.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+    
+    # Initialize target heading buffer if it doesn't exist
+    if not hasattr(env, '_target_heading'):
+        env._target_heading = torch.zeros(env.num_envs, device=env.device)
+    
+    # Only update heading for environments that were reset
+    env._target_heading[env_ids] = current_yaw[env_ids].clone()
 
 
 ##
