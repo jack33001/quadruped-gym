@@ -1,0 +1,332 @@
+#usda 1.0
+(
+    customLayerData = {
+        dictionary cameraSettings = {
+            dictionary Front = {
+                double3 position = (5, 0, 0)
+                double radius = 5
+            }
+            dictionary Perspective = {
+                double3 position = (0.743296631491573, 0.7432966314915721, 0.7432966137503979)
+                double3 target = (0.013562741105065612, -0.11103273127599655, 0.1147431872854856)
+            }
+            dictionary Right = {
+                double3 position = (0, -5, 0)
+                double radius = 5
+            }
+            dictionary Top = {
+                double3 position = (0, 0, 5)
+                double radius = 5
+            }
+            string boundCamera = "/OmniverseKit_Persp"
+        }
+        dictionary omni_layer = {
+            string authoring_layer = "./QuadrupedUSD.usd"
+            dictionary locked = {
+            }
+            dictionary muteness = {
+            }
+        }
+        dictionary renderSettings = {
+        }
+    }
+    defaultPrim = "World"
+    endTimeCode = 1000000
+    metersPerUnit = 1
+    startTimeCode = 0
+    timeCodesPerSecond = 60
+    upAxis = "Z"
+)
+
+def Xform "World"
+{
+    over "QuadrupedXML" (
+        prepend references = @./QuadrupedXML/QuadrupedXML.usd@
+    )
+    {
+        over "worldBody" (
+            active = false
+        )
+        {
+            bool physxArticulation:articulationEnabled = 0
+        }
+
+        over "Torso"
+        {
+            over "Front_Left_Thigh" (
+                prepend apiSchemas = ["PhysxContactReportAPI"]
+            )
+            {
+                string isaac:nameOverride (
+                    displayName = "Name Override"
+                    doc = "Name override for prim lookup in base name search"
+                )
+                float physxContactReport:threshold = 0
+                float physxRigidBody:sleepThreshold = 0
+
+                def IsaacContactSensor "Contact_Sensor"
+                {
+                    float4 color = (1, 0, 0, 1)
+                    bool enabled = 1
+                    float radius = -1
+                    float sensorPeriod = -1
+                    float2 threshold = (0, 100000)
+                    quatd xformOp:orient = (1, 0, 0, 0)
+                    double3 xformOp:scale = (1, 1, 1)
+                    double3 xformOp:translate = (0, 0, 0)
+                    uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
+                }
+            }
+
+            over "Torso" (
+                prepend apiSchemas = ["PhysxContactReportAPI"]
+            )
+            {
+                string isaac:nameOverride (
+                    displayName = "Name Override"
+                    doc = "Name override for prim lookup in base name search"
+                )
+                float physxContactReport:threshold = 0
+                float physxRigidBody:sleepThreshold = 0
+
+                def IsaacContactSensor "Contact_Sensor"
+                {
+                    float4 color = (1, 0, 0, 1)
+                    bool enabled = 1
+                    float radius = -1
+                    float sensorPeriod = -1
+                    float2 threshold = (0, 100000)
+                    quatd xformOp:orient = (1, 0, 0, 0)
+                    double3 xformOp:scale = (1, 1, 1)
+                    double3 xformOp:translate = (0, 0, 0)
+                    uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
+                }
+            }
+
+            over "Front_Right_Thigh" (
+                prepend apiSchemas = ["PhysxContactReportAPI"]
+            )
+            {
+                string isaac:nameOverride (
+                    displayName = "Name Override"
+                    doc = "Name override for prim lookup in base name search"
+                )
+                float physxContactReport:threshold = 0
+                float physxRigidBody:sleepThreshold = 0
+
+                def IsaacContactSensor "Contact_Sensor"
+                {
+                    float4 color = (1, 0, 0, 1)
+                    bool enabled = 1
+                    float radius = -1
+                    float sensorPeriod = -1
+                    float2 threshold = (0, 100000)
+                    quatd xformOp:orient = (1, 0, 0, 0)
+                    double3 xformOp:scale = (1, 1, 1)
+                    double3 xformOp:translate = (0, 0, 0)
+                    uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
+                }
+            }
+
+            over "Rear_Left_Thigh" (
+                prepend apiSchemas = ["PhysxContactReportAPI"]
+            )
+            {
+                string isaac:nameOverride (
+                    displayName = "Name Override"
+                    doc = "Name override for prim lookup in base name search"
+                )
+                float physxContactReport:threshold = 0
+                float physxRigidBody:sleepThreshold = 0
+
+                def IsaacContactSensor "Contact_Sensor"
+                {
+                    float4 color = (1, 0, 0, 1)
+                    bool enabled = 1
+                    float radius = -1
+                    float sensorPeriod = -1
+                    float2 threshold = (0, 100000)
+                    quatd xformOp:orient = (1, 0, 0, 0)
+                    double3 xformOp:scale = (1, 1, 1)
+                    double3 xformOp:translate = (0, 0, 0)
+                    uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
+                }
+            }
+
+            over "Rear_Right_Thigh" (
+                prepend apiSchemas = ["PhysxContactReportAPI"]
+            )
+            {
+                string isaac:nameOverride (
+                    displayName = "Name Override"
+                    doc = "Name override for prim lookup in base name search"
+                )
+                float physxContactReport:threshold = 0
+                float physxRigidBody:sleepThreshold = 0
+
+                def IsaacContactSensor "Contact_Sensor"
+                {
+                    float4 color = (1, 0, 0, 1)
+                    bool enabled = 1
+                    float radius = -1
+                    float sensorPeriod = -1
+                    float2 threshold = (0, 100000)
+                    quatd xformOp:orient = (1, 0, 0, 0)
+                    double3 xformOp:scale = (1, 1, 1)
+                    double3 xformOp:translate = (0, 0, 0)
+                    uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
+                }
+            }
+        }
+
+        over "joints"
+        {
+            over "Front_Right_Hip"
+            {
+                float drive:angular:physics:damping = 0.5
+                float drive:angular:physics:maxForce = 8
+                float drive:angular:physics:stiffness = 20
+            }
+
+            over "Front_Right_Knee"
+            {
+                float drive:angular:physics:damping = 0.5
+                float drive:angular:physics:maxForce = 8
+                float drive:angular:physics:stiffness = 20
+            }
+
+            over "Front_Left_Hip"
+            {
+                float drive:angular:physics:damping = 0.5
+                float drive:angular:physics:maxForce = 8
+                float drive:angular:physics:stiffness = 20
+            }
+
+            over "Front_Left_Knee"
+            {
+                float drive:angular:physics:damping = 0.5
+                float drive:angular:physics:maxForce = 8
+                float drive:angular:physics:stiffness = 20
+            }
+
+            over "Rear_Right_Hip"
+            {
+                float drive:angular:physics:damping = 0.5
+                float drive:angular:physics:maxForce = 8
+                float drive:angular:physics:stiffness = 20
+            }
+
+            over "Rear_Right_Knee"
+            {
+                float drive:angular:physics:damping = 0.5
+                float drive:angular:physics:maxForce = 8
+                float drive:angular:physics:stiffness = 20
+            }
+
+            over "Rear_Left_Hip"
+            {
+                float drive:angular:physics:damping = 0.5
+                float drive:angular:physics:maxForce = 8
+                float drive:angular:physics:stiffness = 20
+            }
+
+            over "Rear_Left_Knee"
+            {
+                float drive:angular:physics:damping = 0.5
+                float drive:angular:physics:maxForce = 8
+                float drive:angular:physics:stiffness = 20
+            }
+        }
+    }
+}
+
+def Xform "Environment"
+{
+    quatd xformOp:orient = (1, 0, 0, 0)
+    double3 xformOp:scale = (1, 1, 1)
+    double3 xformOp:translate = (0, 0, 0)
+    uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
+
+    def DistantLight "defaultLight" (
+        prepend apiSchemas = ["ShapingAPI"]
+    )
+    {
+        float inputs:angle = 1
+        float inputs:intensity = 3000
+        float inputs:shaping:cone:angle = 180
+        float inputs:shaping:cone:softness
+        float inputs:shaping:focus
+        color3f inputs:shaping:focusTint
+        asset inputs:shaping:ies:file
+        quatd xformOp:orient = (0.6532814824381883, 0.2705980500730985, 0.27059805007309845, 0.6532814824381882)
+        double3 xformOp:scale = (1, 1, 1)
+        double3 xformOp:translate = (0, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
+    }
+}
+
+def "Render" (
+    hide_in_stage_window = true
+    no_delete = true
+)
+{
+    def "OmniverseKit"
+    {
+        def "HydraTextures" (
+            hide_in_stage_window = true
+            no_delete = true
+        )
+        {
+            def RenderProduct "omni_kit_widget_viewport_ViewportTexture_0" (
+                prepend apiSchemas = ["OmniRtxSettingsCommonAdvancedAPI_1", "OmniRtxSettingsRtAdvancedAPI_1", "OmniRtxSettingsPtAdvancedAPI_1", "OmniRtxPostColorGradingAPI_1", "OmniRtxPostChromaticAberrationAPI_1", "OmniRtxPostBloomPhysicalAPI_1", "OmniRtxPostMatteObjectAPI_1", "OmniRtxPostCompositingAPI_1", "OmniRtxPostDofAPI_1", "OmniRtxPostMotionBlurAPI_1", "OmniRtxPostTvNoiseAPI_1", "OmniRtxPostTonemapIrayReinhardAPI_1", "OmniRtxPostDebugSettingsAPI_1", "OmniRtxDebugSettingsAPI_1"]
+                hide_in_stage_window = true
+                no_delete = true
+            )
+            {
+                rel camera = </OmniverseKit_Persp>
+                token omni:rtx:background:source:texture:textureMode = "repeatMirrored"
+                token omni:rtx:background:source:type = "domeLight"
+                bool omni:rtx:material:db:nonVisualMaterialCSV:enabled = 0
+                token omni:rtx:post:dlss:execMode = "performance"
+                bool omni:rtx:post:registeredCompositing:invertColorCorrection = 1
+                bool omni:rtx:post:registeredCompositing:invertToneMap = 1
+                bool omni:rtx:pt:lightcache:cached:dontResolveConflicts = 1
+                int omni:rtx:pt:maxSamplesPerLaunch = 2073600
+                int omni:rtx:pt:mgpu:maxPixelsPerRegionExponent = 12
+                color3f omni:rtx:rt:ambientLight:color = (0.1, 0.1, 0.1)
+                bool omni:rtx:rt:demoire = 0
+                bool omni:rtx:rt:lightcache:spatialCache:dontResolveConflicts = 1
+                uint omni:rtx:viewTile:limit = 4294967295
+                rel orderedVars = </Render/Vars/LdrColor>
+                custom bool overrideClipRange = 0
+                uniform int2 resolution = (1280, 720)
+            }
+        }
+    }
+
+    def RenderSettings "OmniverseGlobalRenderSettings" (
+        prepend apiSchemas = ["OmniRtxSettingsGlobalRtAdvancedAPI_1", "OmniRtxSettingsGlobalPtAdvancedAPI_1"]
+        no_delete = true
+    )
+    {
+        rel products = </Render/OmniverseKit/HydraTextures/omni_kit_widget_viewport_ViewportTexture_0>
+    }
+
+    def "Vars"
+    {
+        def RenderVar "LdrColor" (
+            hide_in_stage_window = true
+            no_delete = true
+        )
+        {
+            uniform string sourceName = "LdrColor"
+        }
+    }
+}
+
+def PhysicsScene "physicsScene" (
+    prepend apiSchemas = ["PhysxSceneAPI"]
+)
+{
+}
+
