@@ -9,6 +9,7 @@ from isaaclab.envs import ManagerBasedRLEnv
 from rsl_rl.env import VecEnv
 
 from gait_cfg import GaitScheduler, GaitSchedulerCfg
+from sim_cfg import compute_projected_gravity
 
 
 class IsaacLabVecEnvWrapper(VecEnv):
@@ -130,13 +131,7 @@ class IsaacLabVecEnvWrapper(VecEnv):
         imu_sensor = self._env.scene.sensors["imu"]
         ang_vel = imu_sensor.data.ang_vel_b.clone()
         
-        # Compute projected gravity from IMU orientation
-        quat = imu_sensor.data.quat_w
-        w, x, y, z = quat[:, 0], quat[:, 1], quat[:, 2], quat[:, 3]
-        gx = 2 * (x * z - w * y)
-        gy = 2 * (y * z + w * x)
-        gz = w * w - x * x - y * y + z * z
-        projected_gravity = torch.stack([gx, gy, gz], dim=-1)
+        projected_gravity = compute_projected_gravity(imu_sensor.data.quat_w)
         
         # Get joint state
         robot = self._env.scene["robot"]

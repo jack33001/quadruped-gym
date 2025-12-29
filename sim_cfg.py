@@ -41,36 +41,63 @@ TARGET_BASE_HEIGHT = 0.22
 
 
 ##
-# Custom observation functions
+# Shared sensor configurations
 ##
 
-def imu_angular_velocity(env, sensor_cfg: SceneEntityCfg) -> torch.Tensor:
-    """Get angular velocity from IMU sensor in body frame.
-    
-    Args:
-        env: The environment instance.
-        sensor_cfg: Configuration specifying the IMU sensor name.
-        
-    Returns:
-        Angular velocity tensor of shape (num_envs, 3).
-    """
-    imu_sensor = env.scene.sensors[sensor_cfg.name]
-    return imu_sensor.data.ang_vel_b
+IMU_CFG = ImuCfg(
+    prim_path="{ENV_REGEX_NS}/Robot/Quadruped/Torso/Torso",
+    update_period=0.0,
+    history_length=1,
+    debug_vis=False,
+)
+
+TORSO_CONTACT_CFG = ContactSensorCfg(
+    prim_path="{ENV_REGEX_NS}/Robot/Quadruped/Torso/Torso",
+    history_length=3,
+    track_air_time=False,
+    update_period=0.0,
+)
+
+THIGH_CONTACT_CFG = ContactSensorCfg(
+    prim_path="{ENV_REGEX_NS}/Robot/Quadruped/Torso/.*_Thigh",
+    history_length=3,
+    track_air_time=False,
+    update_period=0.0,
+)
+
+SHIN_CONTACT_CFG = ContactSensorCfg(
+    prim_path="{ENV_REGEX_NS}/Robot/Quadruped/Torso/.*_Shin",
+    history_length=3,
+    track_air_time=False,
+    update_period=0.0,
+)
+
+FOOT_CONTACT_CFG = ContactSensorCfg(
+    prim_path="{ENV_REGEX_NS}/Robot/Quadruped/Torso/.*_Foot",
+    history_length=3,
+    track_air_time=True,
+    update_period=0.0,
+)
+
+LIGHT_CFG = AssetBaseCfg(
+    prim_path="/World/light",
+    spawn=sim_utils.DistantLightCfg(color=(0.75, 0.75, 0.75), intensity=3000.0),
+)
 
 
-def imu_projected_gravity(env, sensor_cfg: SceneEntityCfg) -> torch.Tensor:
-    """Compute gravity vector projected into body frame from IMU orientation.
+##
+# Utility functions
+##
+
+def compute_projected_gravity(quat: torch.Tensor) -> torch.Tensor:
+    """Compute gravity vector projected into body frame from quaternion.
     
     Args:
-        env: The environment instance.
-        sensor_cfg: Configuration specifying the IMU sensor name.
+        quat: Quaternion tensor of shape (num_envs, 4) in (w, x, y, z) order.
         
     Returns:
         Projected gravity tensor of shape (num_envs, 3).
     """
-    imu_sensor = env.scene.sensors[sensor_cfg.name]
-    quat = imu_sensor.data.quat_w
-    
     w, x, y, z = quat[:, 0], quat[:, 1], quat[:, 2], quat[:, 3]
     
     gx = 2 * (x * z - w * y)
@@ -78,6 +105,22 @@ def imu_projected_gravity(env, sensor_cfg: SceneEntityCfg) -> torch.Tensor:
     gz = w * w - x * x - y * y + z * z
     
     return torch.stack([gx, gy, gz], dim=-1)
+
+
+##
+# Custom observation functions
+##
+
+def imu_angular_velocity(env, sensor_cfg: SceneEntityCfg) -> torch.Tensor:
+    """Get angular velocity from IMU sensor in body frame."""
+    imu_sensor = env.scene.sensors[sensor_cfg.name]
+    return imu_sensor.data.ang_vel_b
+
+
+def imu_projected_gravity(env, sensor_cfg: SceneEntityCfg) -> torch.Tensor:
+    """Compute gravity vector projected into body frame from IMU orientation."""
+    imu_sensor = env.scene.sensors[sensor_cfg.name]
+    return compute_projected_gravity(imu_sensor.data.quat_w)
 
 
 ##
@@ -383,7 +426,7 @@ QUADRUPED_CFG = ArticulationCfg(
 
 
 ##
-# Flat Ground Scene Configuration (for training)
+# Scene Configurations
 ##
 
 @configclass
@@ -396,50 +439,16 @@ class FlatGroundSceneCfg(InteractiveSceneCfg):
     )
 
     robot: ArticulationCfg = QUADRUPED_CFG
-
-    imu = ImuCfg(
-        prim_path="{ENV_REGEX_NS}/Robot/Quadruped/Torso/Torso",
-        update_period=0.0,
-        history_length=1,
-        debug_vis=False,
-    )
-
-    torso_contact = ContactSensorCfg(
-        prim_path="{ENV_REGEX_NS}/Robot/Quadruped/Torso/Torso",
-        history_length=3,
-        track_air_time=False,
-        update_period=0.0,
-    )
-
-    thigh_contact = ContactSensorCfg(
-        prim_path="{ENV_REGEX_NS}/Robot/Quadruped/Torso/.*_Thigh",
-        history_length=3,
-        track_air_time=False,
-        update_period=0.0,
-    )
-
-    shin_contact = ContactSensorCfg(
-        prim_path="{ENV_REGEX_NS}/Robot/Quadruped/Torso/.*_Shin",
-        history_length=3,
-        track_air_time=False,
-        update_period=0.0,
-    )
-
-    foot_contact = ContactSensorCfg(
-        prim_path="{ENV_REGEX_NS}/Robot/Quadruped/Torso/.*_Foot",
-        history_length=3,
-        track_air_time=True,
-        update_period=0.0,
-    )
-
-    light = AssetBaseCfg(
-        prim_path="/World/light",
-        spawn=sim_utils.DistantLightCfg(color=(0.75, 0.75, 0.75), intensity=3000.0),
-    )
+    imu: ImuCfg = IMU_CFG
+    torso_contact: ContactSensorCfg = TORSO_CONTACT_CFG
+    thigh_contact: ContactSensorCfg = THIGH_CONTACT_CFG
+    shin_contact: ContactSensorCfg = SHIN_CONTACT_CFG
+    foot_contact: ContactSensorCfg = FOOT_CONTACT_CFG
+    light: AssetBaseCfg = LIGHT_CFG
 
 
 ##
-# Terrain Configuration (for rough terrain evaluation/training)
+# Terrain Configuration
 ##
 
 TERRAIN_SUB_TERRAINS = {
@@ -503,43 +512,9 @@ class QuadrupedSceneCfg(InteractiveSceneCfg):
     )
 
     robot: ArticulationCfg = QUADRUPED_CFG
-
-    imu = ImuCfg(
-        prim_path="{ENV_REGEX_NS}/Robot/Quadruped/Torso/Torso",
-        update_period=0.0,
-        history_length=1,
-        debug_vis=False,
-    )
-
-    torso_contact = ContactSensorCfg(
-        prim_path="{ENV_REGEX_NS}/Robot/Quadruped/Torso/Torso",
-        history_length=3,
-        track_air_time=False,
-        update_period=0.0,
-    )
-
-    thigh_contact = ContactSensorCfg(
-        prim_path="{ENV_REGEX_NS}/Robot/Quadruped/Torso/.*_Thigh",
-        history_length=3,
-        track_air_time=False,
-        update_period=0.0,
-    )
-
-    shin_contact = ContactSensorCfg(
-        prim_path="{ENV_REGEX_NS}/Robot/Quadruped/Torso/.*_Shin",
-        history_length=3,
-        track_air_time=False,
-        update_period=0.0,
-    )
-
-    foot_contact = ContactSensorCfg(
-        prim_path="{ENV_REGEX_NS}/Robot/Quadruped/Torso/.*_Foot",
-        history_length=3,
-        track_air_time=True,
-        update_period=0.0,
-    )
-
-    light = AssetBaseCfg(
-        prim_path="/World/light",
-        spawn=sim_utils.DistantLightCfg(color=(0.75, 0.75, 0.75), intensity=3000.0),
-    )
+    imu: ImuCfg = IMU_CFG
+    torso_contact: ContactSensorCfg = TORSO_CONTACT_CFG
+    thigh_contact: ContactSensorCfg = THIGH_CONTACT_CFG
+    shin_contact: ContactSensorCfg = SHIN_CONTACT_CFG
+    foot_contact: ContactSensorCfg = FOOT_CONTACT_CFG
+    light: AssetBaseCfg = LIGHT_CFG
