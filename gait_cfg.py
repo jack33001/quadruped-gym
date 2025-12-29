@@ -25,6 +25,9 @@ class GaitParams:
     
     Phase offsets are fractions of the gait cycle [0, 1).
     Leg order: [front_right, front_left, rear_right, rear_left]
+    
+    Target step frequency at 1 m/s is 7.5 Hz, giving cycle_duration ~0.133s.
+    Duty factor (stance fraction) varies by gait type.
     """
     name: str
     stance_duration: float
@@ -44,38 +47,38 @@ class GaitParams:
 GAIT_PARAMS = {
     GaitType.TROT: GaitParams(
         name="trot",
-        stance_duration=0.3,
-        swing_duration=0.2,
+        stance_duration=0.08,
+        swing_duration=0.053,
         phase_offsets=(0.0, 0.5, 0.5, 0.0),
     ),
     GaitType.RUN: GaitParams(
         name="run",
-        stance_duration=0.2,
-        swing_duration=0.15,
+        stance_duration=0.066,
+        swing_duration=0.067,
         phase_offsets=(0.0, 0.5, 0.25, 0.75),
     ),
     GaitType.BOUND: GaitParams(
         name="bound",
-        stance_duration=0.25,
-        swing_duration=0.2,
+        stance_duration=0.073,
+        swing_duration=0.06,
         phase_offsets=(0.0, 0.0, 0.5, 0.5),
     ),
     GaitType.PRONK: GaitParams(
         name="pronk",
-        stance_duration=0.3,
-        swing_duration=0.25,
+        stance_duration=0.073,
+        swing_duration=0.06,
         phase_offsets=(0.0, 0.0, 0.0, 0.0),
     ),
     GaitType.AMBLE: GaitParams(
         name="amble",
-        stance_duration=0.35,
-        swing_duration=0.2,
+        stance_duration=0.08,
+        swing_duration=0.053,
         phase_offsets=(0.0, 0.5, 0.25, 0.75),
     ),
     GaitType.HOP: GaitParams(
         name="hop",
-        stance_duration=0.2,
-        swing_duration=0.3,
+        stance_duration=0.053,
+        swing_duration=0.08,
         phase_offsets=(0.0, 0.0, 0.0, 0.0),
     ),
 }

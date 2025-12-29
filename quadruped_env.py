@@ -26,6 +26,8 @@ class IsaacLabVecEnvWrapper(VecEnv):
             sensor_cfg = SensorCfg()
         self.sensor_cfg = sensor_cfg
         
+        self._velocity_deadzone = sensor_cfg.velocity_deadzone
+        
         # VecEnv required attributes
         self.num_envs = env.num_envs
         self.num_privileged_obs = None
@@ -33,7 +35,7 @@ class IsaacLabVecEnvWrapper(VecEnv):
         self.max_episode_length = int(env.max_episode_length)
         self.device = env.device
 
-        # Buffers
+        # Buffers - episode_length_buf tracks current episode step for each env
         self.episode_length_buf = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         
         # Gait scheduler
@@ -160,9 +162,41 @@ class IsaacLabVecEnvWrapper(VecEnv):
             self._prev_joint_pos = joint_pos.clone()
             self._prev_joint_vel = joint_vel.clone()
 
+    def _apply_velocity_deadzone(self):
+        """Apply deadzone to velocity commands, pushing values away from zero."""
+        cmd_manager = self._env.command_manager
+        if not hasattr(cmd_manager, 'get_command'):
+            return
+        
+        velocity_cmd = cmd_manager.get_command("base_velocity")
+        if velocity_cmd is None:
+            return
+        
+        deadzone = self._velocity_deadzone
+        if deadzone <= 0:
+            return
+        
+        lin_vel_x = velocity_cmd[:, 0]
+        
+        in_positive_deadzone = (lin_vel_x > 0) & (lin_vel_x < deadzone)
+        in_negative_deadzone = (lin_vel_x < 0) & (lin_vel_x > -deadzone)
+        
+        velocity_cmd[:, 0] = torch.where(
+            in_positive_deadzone,
+            deadzone,
+            velocity_cmd[:, 0]
+        )
+        velocity_cmd[:, 0] = torch.where(
+            in_negative_deadzone,
+            -deadzone,
+            velocity_cmd[:, 0]
+        )
+
     def reset(self):
         """Reset all environments."""
         obs_dict, _ = self._env.reset()
+        
+        self._apply_velocity_deadzone()
         
         # Reset gait scheduler for all envs (uses config default for randomization)
         self.gait_scheduler.reset()
@@ -173,6 +207,9 @@ class IsaacLabVecEnvWrapper(VecEnv):
         # Reset episode tracking
         self.episode_rewards_sum.zero_()
         self.episode_steps.zero_()
+        
+        # Reset episode length buffer (RSL-RL will randomize this if init_at_random_ep_len=True)
+        self.episode_length_buf.zero_()
         
         # Get current state and initialize previous state buffers
         ang_vel, projected_gravity, joint_pos, joint_vel = self._get_robot_state()
@@ -194,6 +231,8 @@ class IsaacLabVecEnvWrapper(VecEnv):
         
         obs_dict, rewards, terminated, truncated, extras = self._env.step(actions)
         
+        self._apply_velocity_deadzone()
+        
         # Update gait scheduler with current velocity command
         cmd_manager = self._env.command_manager
         if hasattr(cmd_manager, 'get_command'):
@@ -210,8 +249,14 @@ class IsaacLabVecEnvWrapper(VecEnv):
         phase_increment = (self.sim_dt / cycle_durations) * 2.0 * 3.14159265359
         self.gait_phase = (self.gait_phase + phase_increment) % (2.0 * 3.14159265359)
         
-        # Combine terminated and truncated for RSL-RL
-        dones = terminated | truncated
+        # Increment episode length buffer
+        self.episode_length_buf += 1
+        
+        # Check for timeout based on episode_length_buf vs max_episode_length
+        time_out = self.episode_length_buf >= self.max_episode_length
+        
+        # Combine terminated, truncated, and our timeout check
+        dones = terminated | truncated | time_out
         
         # Track episode performance
         self.episode_rewards_sum += rewards.squeeze() if rewards.dim() > 1 else rewards
@@ -235,6 +280,9 @@ class IsaacLabVecEnvWrapper(VecEnv):
             # Reset phase oscillator for done envs
             self.gait_phase[done_indices] = 0.0
             
+            # Reset episode length buffer for done envs
+            self.episode_length_buf[done_indices] = 0
+            
             self.episode_rewards_sum[dones] = 0.0
             self.episode_steps[dones] = 0.0
             
@@ -256,8 +304,8 @@ class IsaacLabVecEnvWrapper(VecEnv):
         # Convert observations
         self._last_obs = self._convert_obs(obs_dict)
         
-        # RSL-RL expects time_outs in extras
-        extras["time_outs"] = truncated
+        # RSL-RL expects time_outs in extras (use our computed time_out)
+        extras["time_outs"] = time_out
         extras["terrain_levels"] = self.terrain_levels.clone()
         
         # Ensure rewards are 1D and handle NaN

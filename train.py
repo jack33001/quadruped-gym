@@ -61,6 +61,13 @@ def apply_reward_weights(env, reward_weights: RewardWeightsCfg):
 class GaitRewardWrapper(IsaacLabVecEnvWrapper):
     """Wrapper that adds gait tracking rewards to the environment rewards."""
     
+    REWARD_CATEGORIES = {
+        "Efficiency": ["joint_jerk", "joint_torque", "action_smoothness"],
+        "Velocity": ["velocity_tracking"],
+        "Gait_Tracking": ["gait_foot_contact", "gait_step_height"],
+        "Stability": ["foot_slip", "body_rates", "base_orientation", "ride_height", "hip_position", "leg_collision"],
+    }
+    
     def __init__(self, env, reward_weights: RewardWeightsCfg, sensor_cfg=None):
         self.reward_weights = reward_weights
         self._episode_sums = None
@@ -70,10 +77,6 @@ class GaitRewardWrapper(IsaacLabVecEnvWrapper):
         self._episode_sums = {
             "gait_foot_contact": torch.zeros(self.num_envs, device=self.device),
             "gait_step_height": torch.zeros(self.num_envs, device=self.device),
-            "category_efficiency": torch.zeros(self.num_envs, device=self.device),
-            "category_velocity": torch.zeros(self.num_envs, device=self.device),
-            "category_gait_tracking": torch.zeros(self.num_envs, device=self.device),
-            "category_stability": torch.zeros(self.num_envs, device=self.device),
         }
         
         self._prev_isaac_episode_sums = {}
@@ -87,6 +90,42 @@ class GaitRewardWrapper(IsaacLabVecEnvWrapper):
         self._prev_isaac_episode_sums = {}
         return obs
     
+    def _get_category_for_reward(self, reward_name: str) -> str:
+        """Get the category for a given reward name."""
+        for category, rewards in self.REWARD_CATEGORIES.items():
+            if reward_name in rewards:
+                return category
+        return "Other"
+    
+    def _reorganize_reward_logs(self, extras: dict) -> dict:
+        """Reorganize reward logs from Episode_Reward/* to Category/reward_name format."""
+        if "log" not in extras:
+            return extras
+        
+        log = extras["log"]
+        new_log = {}
+        category_sums = {}
+        
+        for key, value in log.items():
+            if key.startswith("Episode_Reward/"):
+                reward_name = key.replace("Episode_Reward/", "")
+                category = self._get_category_for_reward(reward_name)
+                
+                new_key = f"{category}/{reward_name}"
+                new_log[new_key] = value
+                
+                if category not in category_sums:
+                    category_sums[category] = 0.0
+                category_sums[category] += value
+            else:
+                new_log[key] = value
+        
+        for category, total in category_sums.items():
+            new_log[f"Category_Total/{category}"] = total
+        
+        extras["log"] = new_log
+        return extras
+    
     def step(self, actions):
         """Step with added gait rewards."""
         obs, rewards, dones, extras = super().step(actions)
@@ -96,7 +135,6 @@ class GaitRewardWrapper(IsaacLabVecEnvWrapper):
         
         self._episode_sums["gait_foot_contact"] += gait_components["foot_contact"]
         self._episode_sums["gait_step_height"] += gait_components["step_height"]
-        self._episode_sums["category_gait_tracking"] += gait_components["foot_contact"] + gait_components["step_height"]
         
         if "log" not in extras:
             extras["log"] = {}
@@ -107,7 +145,6 @@ class GaitRewardWrapper(IsaacLabVecEnvWrapper):
             
             extras["log"]["Episode_Reward/gait_foot_contact"] = (self._episode_sums["gait_foot_contact"] * done_mask).sum().item() / max(num_dones, 1)
             extras["log"]["Episode_Reward/gait_step_height"] = (self._episode_sums["gait_step_height"] * done_mask).sum().item() / max(num_dones, 1)
-            extras["log"]["Reward_Category/category_gait_tracking"] = (self._episode_sums["category_gait_tracking"] * done_mask).sum().item() / max(num_dones, 1)
             
             for key in self._episode_sums:
                 self._episode_sums[key] = torch.where(
@@ -116,28 +153,7 @@ class GaitRewardWrapper(IsaacLabVecEnvWrapper):
                     self._episode_sums[key]
                 )
         
-        if "log" in extras:
-            log = extras["log"]
-            
-            eff_sum = (
-                log.get("Episode_Reward/joint_jerk", 0.0) +
-                log.get("Episode_Reward/joint_torque", 0.0) +
-                log.get("Episode_Reward/action_smoothness", 0.0)
-            )
-            vel_sum = log.get("Episode_Reward/velocity_tracking", 0.0)
-            stab_sum = (
-                log.get("Episode_Reward/foot_slip", 0.0) +
-                log.get("Episode_Reward/body_rates", 0.0) +
-                log.get("Episode_Reward/base_orientation", 0.0) +
-                log.get("Episode_Reward/ride_height", 0.0) +
-                log.get("Episode_Reward/hip_position", 0.0) +
-                log.get("Episode_Reward/leg_collision", 0.0)
-            )
-            
-            if "Episode_Reward/velocity_tracking" in log:
-                extras["log"]["Reward_Category/category_efficiency"] = eff_sum
-                extras["log"]["Reward_Category/category_velocity"] = vel_sum
-                extras["log"]["Reward_Category/category_stability"] = stab_sum
+        extras = self._reorganize_reward_logs(extras)
         
         return obs, rewards, dones, extras
     

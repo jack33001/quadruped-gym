@@ -22,6 +22,8 @@ import torch
 from rl_cfg import QuadrupedEnvCfg
 from sim_cfg import QuadrupedSceneCfg
 from evaluate_base import BaseEvaluator, set_camera_view
+from plot_utils import PerformanceRecorder
+from gait_cfg import GaitType, GAIT_PARAMS
 
 
 def get_terrain_bounds(env):
@@ -157,6 +159,7 @@ class RoughTerrainEvaluator(BaseEvaluator):
         self.spotlight_path = None
         self.num_rows = 6
         self.num_cols = 3
+        self.plots_dir = f"{self.log_dir}/plots_rough"
 
     def create_env_cfg(self) -> QuadrupedEnvCfg:
         env_cfg = QuadrupedEnvCfg()
@@ -250,6 +253,24 @@ class RoughTerrainEvaluator(BaseEvaluator):
         if self.spotlight_path:
             update_spotlight(self.spotlight_path, eye_x, eye_y, self.eval_cfg.spotlight_height)
 
+    def setup_performance_recording(self, env) -> PerformanceRecorder:
+        """Setup recording with one environment per gait type on rough terrain."""
+        gait_scheduler = env.gait_scheduler
+        
+        all_gait_names = [GAIT_PARAMS[gt].name for gt in GaitType]
+        num_gaits = len(all_gait_names)
+        
+        for i in range(min(num_gaits, env.num_envs)):
+            gait_scheduler.gait_types[i] = i
+        
+        env_indices = list(range(min(num_gaits, env.num_envs)))
+        gait_names = all_gait_names[:len(env_indices)]
+        
+        print(f"Recording performance for gaits: {gait_names}")
+        print(f"  Environment indices: {env_indices}")
+        
+        return PerformanceRecorder(gait_names, env_indices, env.device)
+
     def get_video_filename(self) -> str:
         return "evaluation.mp4"
 
@@ -264,6 +285,7 @@ class RoughTerrainEvaluator(BaseEvaluator):
         print(f"Camera pan duration: {self.evaluation_duration}s")
         print(f"Headless: {self.headless}")
         print(f"Record video: {self.record_video}")
+        print(f"Performance plots will be saved to: {self.plots_dir}")
         print("=" * 80 + "\n")
 
 

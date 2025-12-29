@@ -21,6 +21,8 @@ class SensorCfg:
     
     obs_clip_value: float = 100.0
     action_clip_value: float = 5.0
+    
+    velocity_deadzone: float = 0.3
 
 
 @dataclass
@@ -61,10 +63,10 @@ class RewardWeightsCfg:
     
     velocity_tracking: float = 2.0
     
-    foot_contact_tracking: float = 0.06
+    foot_contact_tracking: float = 0.1
     step_height_tracking: float = 0.2
     
-    foot_slip: float = -0.05
+    foot_slip: float = -0.1
     body_rates: float = -0.05
     base_orientation: float = 0.2
     ride_height: float = 0.3
