@@ -15,18 +15,17 @@ from isaaclab.utils import configclass
 import isaaclab.envs.mdp as mdp
 
 from sim_cfg import (
-    QuadrupedSceneCfg,
+    FlatGroundSceneCfg,
     imu_angular_velocity,
     imu_projected_gravity,
-    base_height_below_threshold,
     foot_slip_penalty,
-    distance_traveled_reward,
     leg_contact_penalty,
-    heading_tracking_reward,
     store_initial_heading,
-    foot_air_time_reward,
-    foot_step_height_reward,
-    default_pose_reward,
+    joint_torque_penalty,
+    joint_jerk_penalty,
+    ride_height_reward,
+    base_orientation_reward,
+    hip_position_reward,
 )
 
 
@@ -42,16 +41,16 @@ class ObservationsCfg:
     class PolicyCfg(ObservationGroupCfg):
         """Observations for policy - using IMU data for realistic sim-to-real."""
 
-        # Gravity projection from IMU orientation
-        projected_gravity = ObservationTermCfg(
-            func=imu_projected_gravity,
-            params={"sensor_cfg": SceneEntityCfg("imu")},
-        )
-
         # Velocity commands
         velocity_commands = ObservationTermCfg(
             func=mdp.generated_commands,
             params={"command_name": "base_velocity"}
+        )
+
+        # Gravity projection from IMU orientation
+        projected_gravity = ObservationTermCfg(
+            func=imu_projected_gravity,
+            params={"sensor_cfg": SceneEntityCfg("imu")},
         )
 
         # Angular velocity from IMU
@@ -109,7 +108,7 @@ class CommandsCfg:
         heading_command=False,
         debug_vis=False,
         ranges=mdp.UniformVelocityCommandCfg.Ranges(
-            lin_vel_x=(0.5, 1.5),
+            lin_vel_x=(-2.0, 2.0),
             lin_vel_y=(0.0, 0.0),
             ang_vel_z=(0.0, 0.0),
         ),
@@ -129,14 +128,14 @@ class EventCfg:
         func=mdp.reset_root_state_uniform,
         mode="reset",
         params={
-            "pose_range": {"x": (-0.5, 0.5), "y": (-0.5, 0.5), "yaw": (-3.14159, 3.14159)},
+            "pose_range": {"x": (0,0), "y": (0,0), "yaw": (0,0)},
             "velocity_range": {
-                "x": (0.0, 0.0),
-                "y": (0.0, 0.0),
-                "z": (0.0, 0.0),
-                "roll": (0.0, 0.0),
-                "pitch": (0.0, 0.0),
-                "yaw": (0.0, 0.0),
+                "x": (-0.1, 0.1),
+                "y": (-0.1, 0.1),
+                "z": (-0.1, 0.1),
+                "roll": (-0.1, 0.1),
+                "pitch": (-0.1, 0.1),
+                "yaw": (-0.1, 0.1),
             },
         },
     )
@@ -146,7 +145,7 @@ class EventCfg:
         mode="reset",
         params={
             "position_range": (-0.1, 0.1),
-            "velocity_range": (-0.0, 0.0),
+            "velocity_range": (-0.1, 0.1),
         },
     )
 
@@ -166,64 +165,46 @@ class EventCfg:
 
 @configclass
 class RewardsCfg:
-    """Reward configuration.
+    """Reward configuration with grouped rewards.
     
-    Note: Initial weights are placeholders. Actual weights are set by the
-    curriculum system in train.py from TrainCfg.curriculum_rewards.
+    Groups:
+    - Efficiency: joint_jerk, joint_torque, action_smoothness
+    - Velocity tracking: velocity_tracking
+    - Gait scheduler tracking: foot_contact_tracking, step_height_tracking (computed in wrapper)
+    - Stability: foot_slip, body_rates, base_orientation, ride_height, hip_position
+    
+    Weights are set via TrainCfg.reward_weights.
     """
 
-    # Reward for matching commanded forward/lateral velocity
-    cmd_lin_vel_tracking = RewardTermCfg(
-        func=mdp.track_lin_vel_xy_exp,
-        weight=0.0,  # Set by curriculum
-        params={"command_name": "base_velocity", "std": 0.05},
+    # Efficiency group
+    joint_jerk = RewardTermCfg(
+        func=joint_jerk_penalty,
+        weight=1.0,
+        params={"asset_cfg": SceneEntityCfg("robot")},
     )
 
-    # Reward for matching commanded yaw rate (turning)
-    cmd_yaw_rate_tracking = RewardTermCfg(
-        func=mdp.track_ang_vel_z_exp,
-        weight=0.0,  # Set by curriculum
-        params={"command_name": "base_velocity", "std": 0.05},
+    joint_torque = RewardTermCfg(
+        func=joint_torque_penalty,
+        weight=1.0,
+        params={"asset_cfg": SceneEntityCfg("robot")},
     )
 
-    # Reward for maintaining initial heading orientation
-    heading_tracking = RewardTermCfg(
-        func=heading_tracking_reward,
-        weight=0.0,  # Set by curriculum
-        params={
-            "asset_cfg": SceneEntityCfg("robot"),
-            "std": 0.25,
-        },
-    )
-
-    # Penalize roll and pitch angular velocity (wobbling)
-    roll_pitch_rate_penalty = RewardTermCfg(
-        func=mdp.ang_vel_xy_l2,
-        weight=0.0,  # Set by curriculum
-    )
-
-    # Penalize vertical velocity (bouncing)
-    vertical_vel_penalty = RewardTermCfg(
-        func=mdp.lin_vel_z_l2,
-        weight=0.0,  # Set by curriculum
-    )
-
-    # Penalize jerky/rapid action changes
-    action_smoothness_penalty = RewardTermCfg(
+    action_smoothness = RewardTermCfg(
         func=mdp.action_rate_l2,
-        weight=0.0,  # Set by curriculum
+        weight=1.0,
     )
 
-    # Penalize roll and pitch deviation from upright
-    roll_pitch_orientation_penalty = RewardTermCfg(
-        func=mdp.flat_orientation_l2,
-        weight=0.0,  # Set by curriculum
+    # Velocity tracking group
+    velocity_tracking = RewardTermCfg(
+        func=mdp.track_lin_vel_xy_exp,
+        weight=1.0,
+        params={"command_name": "base_velocity", "std": 0.25},
     )
 
-    # Penalize feet sliding on ground while in contact
-    foot_slip_penalty = RewardTermCfg(
+    # Stability group
+    foot_slip = RewardTermCfg(
         func=foot_slip_penalty,
-        weight=0.0,  # Set by curriculum
+        weight=1.0,
         params={
             "sensor_cfg": SceneEntityCfg("foot_contact"),
             "asset_cfg": SceneEntityCfg("robot"),
@@ -231,54 +212,46 @@ class RewardsCfg:
         },
     )
 
-    # Reward for distance traveled (incentivizes walking far)
-    distance_traveled_reward = RewardTermCfg(
-        func=distance_traveled_reward,
-        weight=0.0,  # Set by curriculum
+    body_rates = RewardTermCfg(
+        func=mdp.ang_vel_xy_l2,
+        weight=1.0,
+    )
+
+    base_orientation = RewardTermCfg(
+        func=base_orientation_reward,
+        weight=1.0,
         params={
             "asset_cfg": SceneEntityCfg("robot"),
+            "std": 0.25,
         },
     )
 
-    # Penalize thigh and shin contacts with ground
-    leg_collision_penalty = RewardTermCfg(
+    ride_height = RewardTermCfg(
+        func=ride_height_reward,
+        weight=1.0,
+        params={
+            "asset_cfg": SceneEntityCfg("robot"),
+            "target_height": 0.22,
+            "std": 0.05,
+        },
+    )
+
+    hip_position = RewardTermCfg(
+        func=hip_position_reward,
+        weight=1.0,
+        params={
+            "asset_cfg": SceneEntityCfg("robot"),
+            "std": 0.3,
+        },
+    )
+
+    leg_collision = RewardTermCfg(
         func=leg_contact_penalty,
-        weight=0.0,  # Set by curriculum (should be negative)
+        weight=1.0,
         params={
             "thigh_sensor_cfg": SceneEntityCfg("thigh_contact"),
             "shin_sensor_cfg": SceneEntityCfg("shin_contact"),
             "threshold": 1.0,
-        },
-    )
-
-    # Reward for foot air time (encourages longer steps, discourages shuffling)
-    foot_air_time = RewardTermCfg(
-        func=foot_air_time_reward,
-        weight=0.0,  # Set by curriculum
-        params={
-            "sensor_cfg": SceneEntityCfg("foot_contact"),
-            "threshold": 0.0,
-        },
-    )
-
-    # Reward for lifting feet higher during swing phase
-    foot_step_height = RewardTermCfg(
-        func=foot_step_height_reward,
-        weight=0.0,  # Set by curriculum
-        params={
-            "sensor_cfg": SceneEntityCfg("foot_contact"),
-            "asset_cfg": SceneEntityCfg("robot"),
-            "target_height": 0.05,
-        },
-    )
-
-    # Reward for staying close to default joint positions
-    default_pose = RewardTermCfg(
-        func=default_pose_reward,
-        weight=0.0,  # Set by curriculum
-        params={
-            "asset_cfg": SceneEntityCfg("robot"),
-            "std": 0.5,
         },
     )
 
@@ -316,7 +289,7 @@ class TerminationsCfg:
 class QuadrupedEnvCfg(ManagerBasedRLEnvCfg):
     """Configuration for quadruped locomotion environment."""
 
-    scene: QuadrupedSceneCfg = QuadrupedSceneCfg(num_envs=4096, env_spacing=2.5)
+    scene: FlatGroundSceneCfg = FlatGroundSceneCfg(num_envs=8192, env_spacing=2.5)
     observations: ObservationsCfg = ObservationsCfg()
     actions: ActionsCfg = ActionsCfg()
     commands: CommandsCfg = CommandsCfg()
@@ -332,15 +305,37 @@ class QuadrupedEnvCfg(ManagerBasedRLEnvCfg):
         self.episode_length_s = 10.0
         self.viewer.eye = (8.0, 8.0, 5.0)
         self.viewer.lookat = (0.0, 0.0, 0.0)
-        
-        # Increase PhysX GPU buffers for complex terrain collisions
-        self.sim.physx.gpu_found_lost_pairs_capacity = 2**24
-        self.sim.physx.gpu_found_lost_aggregate_pairs_capacity = 2**26
-        self.sim.physx.gpu_total_aggregate_pairs_capacity = 2**22
-        self.sim.physx.gpu_max_rigid_contact_count = 2**24
-        self.sim.physx.gpu_max_rigid_patch_count = 2**22
-        self.sim.physx.gpu_heap_capacity = 2**27
-        self.sim.physx.gpu_temp_buffer_capacity = 2**25
+
+
+@dataclass
+class RewardWeightsCfg:
+    """Grouped reward weights with master and sub-weights."""
+    
+    # Master group weights
+    efficiency_weight: float = .001
+    velocity_weight: float = 1.0
+    gait_tracking_weight: float = .005
+    stability_weight: float = 1.0
+    
+    # Efficiency sub-weights
+    joint_jerk: float = -0.0001
+    joint_torque: float = -0.00001
+    action_smoothness: float = -0.001
+    
+    # Velocity tracking sub-weights
+    velocity_tracking: float = 2.0
+    
+    # Gait scheduler tracking sub-weights (applied in wrapper)
+    foot_contact_tracking: float = 0.06
+    step_height_tracking: float = 0.2
+    
+    # Stability sub-weights
+    foot_slip: float = -0.05
+    body_rates: float = -0.05
+    base_orientation: float = 0.2
+    ride_height: float = 0.3
+    hip_position: float = 0.5
+    leg_collision: float = -0.1
 
 
 ##
@@ -351,9 +346,9 @@ class QuadrupedEnvCfg(ManagerBasedRLEnvCfg):
 class TrainCfg:
     """RSL-RL training configuration."""
 
-    experiment_name: str = "quadruped_walking"
+    experiment_name: str = "quadruped_gait"
     run_name: str = ""
-    max_iterations: int = 400
+    max_iterations: int = 250
     save_interval: int = 50
     log_interval: int = 1
     seed: int = 42
@@ -384,46 +379,10 @@ class TrainCfg:
 
     policy: dict = field(default_factory=lambda: {
         "class_name": "ActorCritic",
-        "activation": "elu",
-        "actor_hidden_dims": [256, 128, 64],
-        "critic_hidden_dims": [256, 128, 64],
+        "activation": "lrelu",
+        "actor_hidden_dims": [512, 256, 128],
+        "critic_hidden_dims": [512, 256, 128],
         "init_noise_std": 0.5,
     })
 
-    # Unified curriculum configuration (terrain + rewards coupled)
-    # 6 stages to match 6 terrain difficulty rows
-    curriculum_num_stages: int = 6  # Number of curriculum stages
-    curriculum_promote_threshold: float = 30.0  # Mean episode reward to advance
-    curriculum_demote_threshold: float = 10.0   # Mean episode reward to retreat
-    curriculum_update_freq: int = 10  # Iterations between curriculum updates
-    curriculum_min_episodes: int = 50  # Min episodes at a level before promote/demote
-    curriculum_cooldown_promote: int = 20  # Iterations to wait after promotion before next decision
-    curriculum_cooldown_demote: int = 10   # Iterations to wait after demotion before next decision
-
-    # Reward weights per curriculum stage (index = stage, 6 stages total)
-    # Gradually increase tracking rewards and penalties across stages
-    curriculum_rewards: dict = field(default_factory=lambda: {
-        # Stage 0-5: Progressively stricter rewards
-        "cmd_lin_vel_tracking": [20.0, 20.0, 20.0, 20.0, 20.0, 20.0],
-        "cmd_yaw_rate_tracking": [0.025, 0.025, 0.05, 0.05, 0.05, 0.05],
-        "heading_tracking": [-0.1, -.1, -0.1, -0.1, -0.1, -0.1],
-        "roll_pitch_rate_penalty": [-0.005, -0.005, -0.01, -0.01, -0.025, -0.025],
-        "roll_pitch_orientation_penalty": [-0.0, -0.0, -0.05, -0.05, -0.25, -0.25],
-        "vertical_vel_penalty": [-0.25, -0.25, -0.25, -0.25, -0.25, -0.25],
-        "action_smoothness_penalty": [-0.0005, -0.0005, -0.0005, -0.0005, -0.0005, -0.0005],
-        "foot_slip_penalty": [0.0, 0.0, -0.005, -0.005, -0.02, -0.02],
-        "distance_traveled_reward": [.5, .5, .5, .5, .5, .5],
-        "leg_collision_penalty": [-.01, -.01, -.01, -.01, -.01, -.01],
-        "foot_air_time": [0.0, 0.0, 0.05, 0.05, 0.1, 0.1],
-        "foot_step_height": [0.0, 0.0, 0.05, 0.05, 0.1, 0.1],
-        "default_pose": [0.01, 0.01, 0.05, 0.05, 0.1, 0.1],
-    })
-
-
-    # Command ranges per curriculum stage (6 stages)
-    # Gradually increase velocity and turning demands
-    curriculum_commands: dict = field(default_factory=lambda: {
-        "lin_vel_x": [(0.3, 0.6), (0.3, 0.6), (0.3, 0.6), (0.3, 0.6), (0.3, 0.6), (0.3, 0.6)],
-        "lin_vel_y": [(0.0, 0.0), (0.0, 0.0), (0.0, 0.0), (0.0, 0.0), (0.0, 0.0), (0.0, 0.0)],
-        "ang_vel_z": [(0.0, 0.0), (0.0, 0.0), (0.0, 0.0), (0.0, 0.0), (0.0, 0.0), (0.0, 0.0)],
-    })
+    reward_weights: RewardWeightsCfg = field(default_factory=RewardWeightsCfg)

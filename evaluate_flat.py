@@ -11,11 +11,11 @@ os.environ["TORCH_ALLOW_TF32_CUBLAS_OVERRIDE"] = "1"
 # Configuration - edit these values as needed
 HEADLESS = False
 RECORD_VIDEO = True
-VIDEO_DIR = "logs/quadruped_walking/videos_flat"
-FRAMES_DIR = "logs/quadruped_walking/frames_flat"
+EXPERIMENT_NAME = "quadruped_gait"
+VIDEO_DIR = f"logs/{EXPERIMENT_NAME}/videos_flat"
+FRAMES_DIR = f"logs/{EXPERIMENT_NAME}/frames_flat"
 VIDEO_FPS = 30
 NUM_ENVS = 16
-EXPERIMENT_NAME = "quadruped_walking"
 CHECKPOINT = "model_499.pt"
 
 # Camera configuration
@@ -223,17 +223,17 @@ def evaluate():
         else:
             policy_cfg = {
                 "class_name": "ActorCritic",
-                "activation": "elu",
-                "actor_hidden_dims": [256, 128, 64],
-                "critic_hidden_dims": [256, 128, 64],
+                "activation": "lrelu",
+                "actor_hidden_dims": [512, 256, 128],
+                "critic_hidden_dims": [512, 256, 128],
                 "init_noise_std": 0.5,
             }
     except Exception:
         policy_cfg = {
             "class_name": "ActorCritic",
-            "activation": "elu",
-            "actor_hidden_dims": [256, 128, 64],
-            "critic_hidden_dims": [256, 128, 64],
+            "activation": "lrelu",
+            "actor_hidden_dims": [512, 256, 128],
+            "critic_hidden_dims": [512, 256, 128],
             "init_noise_std": 0.5,
         }
 

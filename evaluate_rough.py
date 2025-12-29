@@ -437,17 +437,17 @@ def evaluate():
         else:
             policy_cfg = {
                 "class_name": "ActorCritic",
-                "activation": "elu",
-                "actor_hidden_dims": [256, 128, 64],
-                "critic_hidden_dims": [256, 128, 64],
+                "activation": "lrelu",
+                "actor_hidden_dims": [512, 256, 128],
+                "critic_hidden_dims": [512, 256, 128],
                 "init_noise_std": 0.5,
             }
     except Exception:
         policy_cfg = {
             "class_name": "ActorCritic",
-            "activation": "elu",
-            "actor_hidden_dims": [256, 128, 64],
-            "critic_hidden_dims": [256, 128, 64],
+            "activation": "lrelu",
+            "actor_hidden_dims": [512, 256, 128],
+            "critic_hidden_dims": [512, 256, 128],
             "init_noise_std": 0.5,
         }
     

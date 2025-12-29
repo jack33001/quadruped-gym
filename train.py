@@ -1,28 +1,19 @@
 """
 Training script for quadruped locomotion with Isaac Lab and RSL-RL.
-
-Run with:
-    cd /home/jack/Documents/CP Legged Robots/quadruped-gym
-    python train.py
 """
 import os
 import sys
 
-# CRITICAL: Fix for libtorch executable stack issue on newer Linux kernels (6.17+)
-# This must be set BEFORE importing torch or any Isaac modules
 os.environ["PYTORCH_NVFUSER_DISABLE_FALLBACK"] = "1"
 os.environ["TORCH_ALLOW_TF32_CUBLAS_OVERRIDE"] = "1"
 
-# Configuration - set this before AppLauncher
-HEADLESS = True  # Set to False to show viewer for debugging
+HEADLESS = True
 
 from isaaclab.app import AppLauncher
 
-# Create app launcher and launch the simulator
 app_launcher = AppLauncher(headless=HEADLESS)
 simulation_app = app_launcher.app
 
-# Now we can import everything else
 import pickle
 import shutil
 
@@ -31,170 +22,172 @@ from isaaclab.envs import ManagerBasedRLEnv
 
 from rsl_rl.runners import OnPolicyRunner
 
-from rl_cfg import QuadrupedEnvCfg, TrainCfg
+from rl_cfg import QuadrupedEnvCfg, TrainCfg, RewardWeightsCfg
 from quadruped_env import IsaacLabVecEnvWrapper
 
 
-def apply_curriculum_stage(env, train_cfg: TrainCfg, stage: int, verbose: bool = True):
-    """Apply reward weights and commands for a given curriculum stage."""
+def apply_reward_weights(env, reward_weights: RewardWeightsCfg):
+    """Apply reward weights to the environment."""
     isaac_env = env.unwrapped
     
-    if verbose:
-        print(f"\n{'='*60}")
-        print(f"CURRICULUM STAGE {stage}")
-        print(f"{'='*60}")
+    if not hasattr(isaac_env, 'reward_manager'):
+        return
     
-    # Update reward weights
-    for reward_name, weights in train_cfg.curriculum_rewards.items():
-        if hasattr(isaac_env, 'reward_manager'):
-            reward_manager = isaac_env.reward_manager
-            if hasattr(reward_manager, '_term_names') and hasattr(reward_manager, '_term_cfgs'):
-                if reward_name in reward_manager._term_names:
-                    idx = reward_manager._term_names.index(reward_name)
-                    if isinstance(reward_manager._term_cfgs, list):
-                        reward_manager._term_cfgs[idx].weight = weights[stage]
-                    else:
-                        reward_manager._term_cfgs[reward_name].weight = weights[stage]
-                    if verbose:
-                        print(f"  {reward_name}: weight = {weights[stage]}")
+    reward_manager = isaac_env.reward_manager
     
-    # Update command ranges
-    cmd_ranges = train_cfg.curriculum_commands
-    if hasattr(isaac_env, 'command_manager'):
-        for term in isaac_env.command_manager._terms.values():
-            if hasattr(term, 'cfg') and hasattr(term.cfg, 'ranges'):
-                term.cfg.ranges.lin_vel_x = cmd_ranges["lin_vel_x"][stage]
-                term.cfg.ranges.lin_vel_y = cmd_ranges["lin_vel_y"][stage]
-                term.cfg.ranges.ang_vel_z = cmd_ranges["ang_vel_z"][stage]
-                if verbose:
-                    print(f"  Commands: lin_vel_x={cmd_ranges['lin_vel_x'][stage]}, "
-                          f"lin_vel_y={cmd_ranges['lin_vel_y'][stage]}, "
-                          f"ang_vel_z={cmd_ranges['ang_vel_z'][stage]}")
+    weight_map = {
+        "joint_jerk": reward_weights.efficiency_weight * reward_weights.joint_jerk,
+        "joint_torque": reward_weights.efficiency_weight * reward_weights.joint_torque,
+        "action_smoothness": reward_weights.efficiency_weight * reward_weights.action_smoothness,
+        "velocity_tracking": reward_weights.velocity_weight * reward_weights.velocity_tracking,
+        "foot_slip": reward_weights.stability_weight * reward_weights.foot_slip,
+        "body_rates": reward_weights.stability_weight * reward_weights.body_rates,
+        "base_orientation": reward_weights.stability_weight * reward_weights.base_orientation,
+        "ride_height": reward_weights.stability_weight * reward_weights.ride_height,
+        "hip_position": reward_weights.stability_weight * reward_weights.hip_position,
+        "leg_collision": reward_weights.stability_weight * reward_weights.leg_collision,
+    }
     
-    # Update terrain level
-    terrain_level = env.set_terrain_level_for_stage(stage, train_cfg.curriculum_num_stages)
-    if verbose:
-        print(f"  Terrain level: {terrain_level} / {env.max_terrain_level}")
-        print(f"{'='*60}\n")
+    for reward_name, weight in weight_map.items():
+        if hasattr(reward_manager, '_term_names') and hasattr(reward_manager, '_term_cfgs'):
+            if reward_name in reward_manager._term_names:
+                idx = reward_manager._term_names.index(reward_name)
+                if isinstance(reward_manager._term_cfgs, list):
+                    reward_manager._term_cfgs[idx].weight = weight
+                else:
+                    reward_manager._term_cfgs[reward_name].weight = weight
 
 
-class OnPolicyRunnerWithCurriculum(OnPolicyRunner):
-    """
-    OnPolicyRunner with unified performance-based curriculum.
-    """
+class GaitRewardWrapper(IsaacLabVecEnvWrapper):
+    """Wrapper that adds gait tracking rewards to the environment rewards."""
     
-    def __init__(self, *args, train_cfg_obj=None, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.train_cfg_obj = train_cfg_obj
-        self.current_stage = 0
-        self._curriculum_update_counter = 0
-        self._stage_episode_rewards = []  # Track rewards at current stage
-        self._cooldown_remaining = 0  # Iterations to wait after stage change
-
-    def log(self, locs: dict, width: int = 80, pad: int = 35) -> None:
-        """Override log method to add unified curriculum update."""
-        if self.train_cfg_obj is not None:
-            self._curriculum_update_counter += 1
-            
-            # Collect completed episodes
-            completed = self.env.get_completed_episodes()
-            self._stage_episode_rewards.extend([r for r, _ in completed])
-            
-            # Check curriculum update
-            if self._curriculum_update_counter >= self.train_cfg_obj.curriculum_update_freq:
-                self._curriculum_update_counter = 0
-                self._update_unified_curriculum()
+    def __init__(self, env, reward_weights: RewardWeightsCfg):
+        self.reward_weights = reward_weights
+        self._episode_sums = None
+        self._prev_isaac_episode_sums = None
+        super().__init__(env)
         
-        # Log terrain level distribution
-        if hasattr(self.env, 'get_terrain_levels'):
-            terrain_levels = self.env.get_terrain_levels()
-        elif hasattr(self.env, 'terrain_levels'):
-            terrain_levels = self.env.terrain_levels
-        else:
-            terrain_levels = None
+        self._episode_sums = {
+            "gait_foot_contact": torch.zeros(self.num_envs, device=self.device),
+            "gait_step_height": torch.zeros(self.num_envs, device=self.device),
+            "category_efficiency": torch.zeros(self.num_envs, device=self.device),
+            "category_velocity": torch.zeros(self.num_envs, device=self.device),
+            "category_gait_tracking": torch.zeros(self.num_envs, device=self.device),
+            "category_stability": torch.zeros(self.num_envs, device=self.device),
+        }
         
-        if terrain_levels is not None and self.writer is not None:
-            mean_level = terrain_levels.float().mean().item()
-            self.writer.add_scalar(
-                "Curriculum/terrain_level", 
-                mean_level, 
-                self.current_learning_iteration
-            )
-            self.writer.add_scalar(
-                "Curriculum/stage", 
-                self.current_stage, 
-                self.current_learning_iteration
-            )
+        self._prev_isaac_episode_sums = {}
+    
+    def reset(self):
+        """Reset and clear episode sums."""
+        obs = super().reset()
+        if self._episode_sums is not None:
+            for key in self._episode_sums:
+                self._episode_sums[key].zero_()
+        self._prev_isaac_episode_sums = {}
+        return obs
+    
+    def step(self, actions):
+        """Step with added gait rewards."""
+        obs, rewards, dones, extras = super().step(actions)
+        
+        gait_rewards, gait_components = self._compute_gait_rewards()
+        rewards = rewards + gait_rewards
+        
+        self._episode_sums["gait_foot_contact"] += gait_components["foot_contact"]
+        self._episode_sums["gait_step_height"] += gait_components["step_height"]
+        self._episode_sums["category_gait_tracking"] += gait_components["foot_contact"] + gait_components["step_height"]
+        
+        if "log" not in extras:
+            extras["log"] = {}
+        
+        num_dones = dones.sum().item()
+        if num_dones > 0:
+            done_mask = dones.float()
             
-            # Log mean episode reward for curriculum
-            if len(self._stage_episode_rewards) > 0:
-                mean_reward = sum(self._stage_episode_rewards) / len(self._stage_episode_rewards)
-                self.writer.add_scalar(
-                    "Curriculum/mean_episode_reward",
-                    mean_reward,
-                    self.current_learning_iteration
+            extras["log"]["Episode_Reward/gait_foot_contact"] = (self._episode_sums["gait_foot_contact"] * done_mask).sum().item() / max(num_dones, 1)
+            extras["log"]["Episode_Reward/gait_step_height"] = (self._episode_sums["gait_step_height"] * done_mask).sum().item() / max(num_dones, 1)
+            extras["log"]["Reward_Category/category_gait_tracking"] = (self._episode_sums["category_gait_tracking"] * done_mask).sum().item() / max(num_dones, 1)
+            
+            for key in self._episode_sums:
+                self._episode_sums[key] = torch.where(
+                    dones, 
+                    torch.zeros_like(self._episode_sums[key]),
+                    self._episode_sums[key]
                 )
         
-        super().log(locs, width, pad)
-        if self.writer is not None:
-            self.writer.flush()
-
-    def _update_unified_curriculum(self):
-        """Update curriculum stage based on recent episode performance."""
-        cfg = self.train_cfg_obj
+        if "log" in extras:
+            log = extras["log"]
+            
+            eff_sum = (
+                log.get("Episode_Reward/joint_jerk", 0.0) +
+                log.get("Episode_Reward/joint_torque", 0.0) +
+                log.get("Episode_Reward/action_smoothness", 0.0)
+            )
+            vel_sum = log.get("Episode_Reward/velocity_tracking", 0.0)
+            stab_sum = (
+                log.get("Episode_Reward/foot_slip", 0.0) +
+                log.get("Episode_Reward/body_rates", 0.0) +
+                log.get("Episode_Reward/base_orientation", 0.0) +
+                log.get("Episode_Reward/ride_height", 0.0) +
+                log.get("Episode_Reward/hip_position", 0.0) +
+                log.get("Episode_Reward/leg_collision", 0.0)
+            )
+            
+            if "Episode_Reward/velocity_tracking" in log:
+                extras["log"]["Reward_Category/category_efficiency"] = eff_sum
+                extras["log"]["Reward_Category/category_velocity"] = vel_sum
+                extras["log"]["Reward_Category/category_stability"] = stab_sum
         
-        # Check if we're in cooldown period after a stage change
-        if self._cooldown_remaining > 0:
-            self._cooldown_remaining -= 1
-            # Still collect episodes but don't make decisions
-            if self._cooldown_remaining == 0:
-                # Cooldown finished, clear old data to start fresh evaluation
-                self._stage_episode_rewards.clear()
-                print(f"  [Curriculum] Cooldown finished, collecting fresh data for stage {self.current_stage}")
-            return
+        return obs, rewards, dones, extras
+    
+    def _compute_gait_rewards(self) -> tuple[torch.Tensor, dict]:
+        """Compute gait scheduler tracking rewards."""
+        gait_scheduler = self.gait_scheduler
+        isaac_env = self._env
         
-        # Need minimum episodes to make a decision
-        if len(self._stage_episode_rewards) < cfg.curriculum_min_episodes:
-            return
+        desired_contacts, desired_heights = gait_scheduler.get_gait_obs()
         
-        mean_reward = sum(self._stage_episode_rewards) / len(self._stage_episode_rewards)
+        foot_contact_sensor = isaac_env.scene.sensors["foot_contact"]
+        contact_forces = foot_contact_sensor.data.net_forces_w
+        actual_contacts = (torch.norm(contact_forces, dim=-1) > 1.0).float()
         
-        old_stage = self.current_stage
+        contact_match = 1.0 - torch.abs(desired_contacts - actual_contacts)
+        contact_reward = torch.mean(contact_match, dim=-1)
         
-        # Promote if doing well
-        if mean_reward >= cfg.curriculum_promote_threshold:
-            if self.current_stage < cfg.curriculum_num_stages - 1:
-                self.current_stage += 1
-                self._stage_episode_rewards.clear()  # Reset for new stage
-                self._cooldown_remaining = cfg.curriculum_cooldown_promote
-                apply_curriculum_stage(self.env, cfg, self.current_stage)
-                print(f"  [Curriculum] Promoted to stage {self.current_stage}! "
-                      f"Mean reward {mean_reward:.1f} >= {cfg.curriculum_promote_threshold}")
-                print(f"  [Curriculum] Entering cooldown for {self._cooldown_remaining} iterations")
-                return
+        robot = isaac_env.scene["robot"]
+        body_pos = robot.data.body_pos_w
+        num_feet = 4
         
-        # Demote if struggling
-        elif mean_reward < cfg.curriculum_demote_threshold:
-            if self.current_stage > 0:
-                self.current_stage -= 1
-                self._stage_episode_rewards.clear()  # Reset for new stage
-                self._cooldown_remaining = cfg.curriculum_cooldown_demote
-                apply_curriculum_stage(self.env, cfg, self.current_stage)
-                print(f"  [Curriculum] Demoted to stage {self.current_stage}. "
-                      f"Mean reward {mean_reward:.1f} < {cfg.curriculum_demote_threshold}")
-                print(f"  [Curriculum] Entering cooldown for {self._cooldown_remaining} iterations")
-                return
+        if body_pos.shape[1] >= num_feet:
+            foot_pos_z = body_pos[:, -num_feet:, 2]
+        else:
+            foot_pos_z = body_pos[:, :num_feet, 2]
         
-        # If stage didn't change but we have enough data, clear old data to keep window fresh
-        if self.current_stage == old_stage and len(self._stage_episode_rewards) > cfg.curriculum_min_episodes * 2:
-            # Keep only recent half
-            self._stage_episode_rewards = self._stage_episode_rewards[-cfg.curriculum_min_episodes:]
-
-    def save(self, path: str, infos: dict | None = None) -> None:
-        """Override save to also flush writer."""
-        super().save(path, infos)
-        if self.writer is not None:
-            self.writer.flush()
+        terrain_height = torch.zeros(self.num_envs, device=self.device)
+        
+        foot_heights_above_ground = foot_pos_z - terrain_height.unsqueeze(-1)
+        foot_heights_above_ground = torch.clamp(foot_heights_above_ground, min=0.0)
+        
+        height_error = torch.abs(foot_heights_above_ground - desired_heights)
+        height_reward = torch.exp(-height_error.pow(2) / (0.02 * 0.02))
+        height_reward = torch.mean(height_reward, dim=-1)
+        
+        gait_weight = self.reward_weights.gait_tracking_weight
+        contact_weight = self.reward_weights.foot_contact_tracking
+        step_height_weight = self.reward_weights.step_height_tracking
+        
+        weighted_contact = gait_weight * contact_weight * contact_reward
+        weighted_height = gait_weight * step_height_weight * height_reward
+        
+        total_reward = weighted_contact + weighted_height
+        
+        reward_components = {
+            "foot_contact": weighted_contact,
+            "step_height": weighted_height,
+        }
+        
+        return total_reward, reward_components
 
 
 def get_rsl_rl_cfg(train_cfg: TrainCfg, num_envs: int):
@@ -227,37 +220,29 @@ def get_rsl_rl_cfg(train_cfg: TrainCfg, num_envs: int):
 def main():
     """Main training function."""
 
-    # Load configurations
     env_cfg = QuadrupedEnvCfg()
     train_cfg = TrainCfg()
 
-    # Create Isaac Lab environment
     isaac_env = ManagerBasedRLEnv(cfg=env_cfg)
     
-    # Wrap for RSL-RL compatibility
-    env = IsaacLabVecEnvWrapper(isaac_env)
+    env = GaitRewardWrapper(isaac_env, train_cfg.reward_weights)
 
-    # Apply initial curriculum stage (stage 0)
-    apply_curriculum_stage(env, train_cfg, stage=0, verbose=True)
+    apply_reward_weights(env, train_cfg.reward_weights)
 
-    # Setup logging
     log_dir = f"logs/{train_cfg.experiment_name}"
     if os.path.exists(log_dir):
         shutil.rmtree(log_dir)
     os.makedirs(log_dir, exist_ok=True)
 
-    # Save configurations
     pickle.dump({
         "env_cfg": env_cfg,
         "train_cfg": train_cfg,
     }, open(f"{log_dir}/cfgs.pkl", "wb"))
 
-    # Get RSL-RL config
     train_cfg_dict = get_rsl_rl_cfg(train_cfg, env_cfg.scene.num_envs)
 
-    # Print training info
     print("\n" + "=" * 80)
-    print("QUADRUPED RL TRAINING (Isaac Lab)")
+    print("QUADRUPED RL TRAINING (Gait Scheduler)")
     print("=" * 80)
     print(f"Experiment: {train_cfg.experiment_name}")
     print(f"Max iterations: {train_cfg.max_iterations}")
@@ -265,23 +250,27 @@ def main():
     print(f"Steps per env: {train_cfg.num_steps_per_env}")
     print(f"Log directory: {log_dir}")
     print(f"Device: {env.device}")
-    print(f"Curriculum: {train_cfg.curriculum_num_stages} stages (unified terrain + rewards)")
-    print(f"  Promote threshold: {train_cfg.curriculum_promote_threshold}")
-    print(f"  Demote threshold: {train_cfg.curriculum_demote_threshold}")
+    print(f"Network: {train_cfg.policy['actor_hidden_dims']}")
+    print(f"Activation: {train_cfg.policy['activation']}")
+    print(f"Observation dim: {env.num_obs}")
+    print("=" * 80)
+    print("\nReward Group Weights:")
+    rw = train_cfg.reward_weights
+    print(f"  Efficiency: {rw.efficiency_weight}")
+    print(f"  Velocity: {rw.velocity_weight}")
+    print(f"  Gait Tracking: {rw.gait_tracking_weight}")
+    print(f"  Stability: {rw.stability_weight}")
     print("=" * 80)
     print("\nTensorBoard: tensorboard --logdir logs")
     print("View at: http://localhost:6006\n")
 
-    # Create runner with curriculum support
-    runner = OnPolicyRunnerWithCurriculum(
+    runner = OnPolicyRunner(
         env=env,
         train_cfg=train_cfg_dict,
         log_dir=log_dir,
         device=env.device,
-        train_cfg_obj=train_cfg,
     )
 
-    # Train
     print("Starting training...\n")
     runner.learn(
         num_learning_iterations=train_cfg.max_iterations,
@@ -292,7 +281,6 @@ def main():
     print(f"Logs saved to: {log_dir}")
     print(f"View with: tensorboard --logdir {log_dir}\n")
 
-    # Cleanup
     env.close()
     simulation_app.close()
 
