@@ -88,14 +88,17 @@ GAIT_PARAMS = {
 class GaitSchedulerCfg:
     """Configuration for the gait scheduler."""
     num_legs: int = 4
-    swing_height: float = 0.07
-    contact_threshold: float = 0.5
+    swing_height: float = 0.05
     default_gait: GaitType = GaitType.AMBLE
     randomize_gait: bool = True
     
     base_velocity: float = 1.0
     min_cycle_scale: float = 0.5
     max_cycle_scale: float = 1.5
+    
+    allow_gait_switching: bool = True
+    min_gait_switch_interval: float = 1.5
+    gait_switch_probability: float = 0.002
 
 
 class GaitScheduler:
@@ -117,6 +120,8 @@ class GaitScheduler:
         self.gait_types = torch.zeros(num_envs, dtype=torch.long, device=device)
         
         self.commanded_velocity = torch.ones(num_envs, device=device) * self.cfg.base_velocity
+        
+        self.time_since_gait_switch = torch.zeros(num_envs, device=device)
         
         self._cache_gait_params()
     
@@ -168,6 +173,7 @@ class GaitScheduler:
             return
         
         self.leg_phases[env_ids] = 0.0
+        self.time_since_gait_switch[env_ids] = 0.0
         
         should_randomize = randomize_gait if randomize_gait is not None else self.cfg.randomize_gait
         
@@ -184,6 +190,29 @@ class GaitScheduler:
         cycle_dur = self.cycle_durations
         phase_increment = dt / cycle_dur.unsqueeze(-1)
         self.leg_phases = (self.leg_phases + phase_increment) % 1.0
+        
+        self.time_since_gait_switch += dt
+        
+        if self.cfg.allow_gait_switching:
+            self._maybe_switch_gaits()
+    
+    def _maybe_switch_gaits(self):
+        """Randomly switch gaits for environments that meet the criteria."""
+        can_switch = self.time_since_gait_switch >= self.cfg.min_gait_switch_interval
+        
+        switch_roll = torch.rand(self.num_envs, device=self.device)
+        should_switch = can_switch & (switch_roll < self.cfg.gait_switch_probability)
+        
+        if should_switch.any():
+            switch_indices = should_switch.nonzero(as_tuple=False).squeeze(-1)
+            if switch_indices.dim() == 0:
+                switch_indices = switch_indices.unsqueeze(0)
+            
+            num_gaits = len(GaitType)
+            new_gaits = torch.randint(0, num_gaits, (len(switch_indices),), device=self.device)
+            self.gait_types[switch_indices] = new_gaits
+            
+            self.time_since_gait_switch[switch_indices] = 0.0
     
     def get_contact_states(self) -> torch.Tensor:
         """Get desired contact state for each leg.

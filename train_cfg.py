@@ -54,7 +54,7 @@ class RewardWeightsCfg:
     
     efficiency_weight: float = .001
     velocity_weight: float = 1.0
-    gait_tracking_weight: float = .005
+    gait_tracking_weight: float = .05
     stability_weight: float = 1.0
     
     joint_jerk: float = -0.0001
@@ -63,13 +63,13 @@ class RewardWeightsCfg:
     
     velocity_tracking: float = 2.0
     
-    foot_contact_tracking: float = 0.1
-    step_height_tracking: float = 0.2
+    foot_contact_tracking: float = 0.5
+    step_height_tracking: float = 0.1
     
     foot_slip: float = -0.1
     body_rates: float = -0.05
     base_orientation: float = 0.2
-    ride_height: float = 0.3
+    ride_height: float = 0.4
     hip_position: float = 0.5
     leg_collision: float = -0.1
 

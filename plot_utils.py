@@ -197,8 +197,8 @@ class PerformancePlotter:
         
         avg_cmd_vel = np.mean(metrics.commanded_velocity) if metrics.commanded_velocity else 0.0
         
-        fig = plt.figure(figsize=(16, 20))
-        gs = fig.add_gridspec(6, 1, hspace=0.3)
+        fig = plt.figure(figsize=(16, 24))
+        gs = fig.add_gridspec(7, 1, hspace=0.3)
         
         fig.suptitle(f"Gait: {metrics.gait_name} | Commanded Velocity: {avg_cmd_vel:.2f} m/s", 
                      fontsize=14, fontweight='bold')
@@ -233,42 +233,54 @@ class PerformancePlotter:
         ax2.axhline(y=0, color='k', linestyle='-', linewidth=0.5)
         
         heading_deg = np.degrees(metrics.heading)
-        heading_drift = heading_deg[-1] - heading_deg[0] if len(heading_deg) > 0 else 0.0
+        heading_drift = np.max(np.abs(heading_deg - heading_deg[0])) if len(heading_deg) > 0 else 0.0
         
         ax3 = fig.add_subplot(gs[2], sharex=ax1)
         ax3.plot(time, heading_deg, 'b-', linewidth=1.5)
         ax3.set_ylabel('Heading (deg)')
-        ax3.set_title(f'Heading | Total Drift: {heading_drift:.1f} deg')
+        ax3.set_title(f'Heading | Max Drift: {heading_drift:.1f} deg')
         ax3.grid(True, alpha=0.3)
+        
+        avg_height = np.mean(metrics.ride_height) if metrics.ride_height else 0.0
+        min_height = np.min(metrics.ride_height) if metrics.ride_height else 0.0
+        max_height = np.max(metrics.ride_height) if metrics.ride_height else 0.0
+        
+        ax4 = fig.add_subplot(gs[3], sharex=ax1)
+        ax4.plot(time, metrics.ride_height, 'b-', linewidth=1.5)
+        ax4.axhline(y=0.22, color='r', linestyle='--', linewidth=1.0, label='Target (0.22m)')
+        ax4.set_ylabel('Height (m)')
+        ax4.set_title(f'Ride Height | Avg: {avg_height:.3f} m, Min: {min_height:.3f} m, Max: {max_height:.3f} m')
+        ax4.legend(loc='upper right')
+        ax4.grid(True, alpha=0.3)
         
         total_energy = metrics.energy[-1] if metrics.energy else 0
         avg_power = np.mean(metrics.power) if metrics.power else 0
         max_power = np.max(metrics.power) if metrics.power else 0
         
-        ax4 = fig.add_subplot(gs[3], sharex=ax1)
-        ax4.plot(time, metrics.power, 'b-', linewidth=1.5)
-        ax4.set_ylabel('Power (W)')
-        ax4.set_title(f'Power | Avg: {avg_power:.1f} W, Max: {max_power:.1f} W, Total Energy: {total_energy:.1f} J')
-        ax4.grid(True, alpha=0.3)
+        ax5 = fig.add_subplot(gs[4], sharex=ax1)
+        ax5.plot(time, metrics.power, 'b-', linewidth=1.5)
+        ax5.set_ylabel('Power (W)')
+        ax5.set_title(f'Power | Avg: {avg_power:.1f} W, Max: {max_power:.1f} W, Total Energy: {total_energy:.1f} J')
+        ax5.grid(True, alpha=0.3)
         
         avg_torque = 0.0
         if metrics.joint_torques:
             torques = np.array(metrics.joint_torques)
             avg_torque = np.mean(np.abs(torques))
         
-        ax5 = fig.add_subplot(gs[4], sharex=ax1)
+        ax6 = fig.add_subplot(gs[5], sharex=ax1)
         if metrics.joint_torques:
             torques = np.array(metrics.joint_torques)
             num_joints = torques.shape[1]
             colors = plt.cm.tab10(np.linspace(0, 1, num_joints))
             for j in range(num_joints):
                 label = self.JOINT_NAMES[j] if j < len(self.JOINT_NAMES) else f'Joint {j}'
-                ax5.plot(time, torques[:, j], color=colors[j], linewidth=1.0, label=label)
-            ax5.legend(loc='upper right', ncol=2, fontsize=8)
-        ax5.set_ylabel('Torque (Nm)')
-        ax5.set_title(f'Joint Torques | Avg Abs Torque: {avg_torque:.2f} Nm')
-        ax5.grid(True, alpha=0.3)
-        ax5.axhline(y=0, color='k', linestyle='-', linewidth=0.5)
+                ax6.plot(time, torques[:, j], color=colors[j], linewidth=1.0, label=label)
+            ax6.legend(loc='upper right', ncol=2, fontsize=8)
+        ax6.set_ylabel('Torque (Nm)')
+        ax6.set_title(f'Joint Torques | Avg Abs Torque: {avg_torque:.2f} Nm')
+        ax6.grid(True, alpha=0.3)
+        ax6.axhline(y=0, color='k', linestyle='-', linewidth=0.5)
         
         actual_freqs = []
         desired_freqs = []
@@ -300,7 +312,7 @@ class PerformancePlotter:
             duty_str_parts.append(f"{name}: {actual_duty_factors[i]*100:.0f}/{desired_duty_factors[i]*100:.0f}%")
         duty_str = ", ".join(duty_str_parts)
         
-        ax6 = fig.add_subplot(gs[5], sharex=ax1)
+        ax7 = fig.add_subplot(gs[6], sharex=ax1)
         if metrics.foot_contacts_actual and metrics.foot_contacts_desired:
             actual = np.array(metrics.foot_contacts_actual)
             desired = np.array(metrics.foot_contacts_desired)
@@ -310,33 +322,34 @@ class PerformancePlotter:
                 foot_name = self.FOOT_NAMES[foot_idx] if foot_idx < len(self.FOOT_NAMES) else f'Foot {foot_idx}'
                 offset = foot_idx * 1.5
                 
-                ax6.fill_between(time, offset, offset + desired[:, foot_idx], 
+                ax7.fill_between(time, offset, offset + desired[:, foot_idx], 
                                alpha=0.3, color='blue', step='post')
-                ax6.step(time, offset + actual[:, foot_idx], where='post', 
+                ax7.step(time, offset + actual[:, foot_idx], where='post', 
                         color='red', linewidth=1.5)
                 
-                ax6.text(-0.02, offset + 0.5, foot_name, transform=ax6.get_yaxis_transform(),
+                ax7.text(-0.02, offset + 0.5, foot_name, transform=ax7.get_yaxis_transform(),
                         ha='right', va='center', fontsize=9)
             
-            ax6.set_ylim(-0.2, num_feet * 1.5 + 0.2)
-            ax6.set_yticks([])
+            ax7.set_ylim(-0.2, num_feet * 1.5 + 0.2)
+            ax7.set_yticks([])
             
             from matplotlib.patches import Patch
             legend_elements = [
                 Patch(facecolor='blue', alpha=0.3, label='Desired Stance'),
                 Patch(facecolor='red', alpha=0.8, label='Actual Contact')
             ]
-            ax6.legend(handles=legend_elements, loc='upper right', fontsize=8)
+            ax7.legend(handles=legend_elements, loc='upper right', fontsize=8)
         
-        ax6.set_xlabel('Time (s)')
-        ax6.set_title(f'Foot Contact States | Freq (Hz): {freq_str}\nDuty Factor: {duty_str}')
-        ax6.grid(True, alpha=0.3, axis='x')
+        ax7.set_xlabel('Time (s)')
+        ax7.set_title(f'Foot Contact States | Freq (Hz): {freq_str}\nDuty Factor: {duty_str}')
+        ax7.grid(True, alpha=0.3, axis='x')
         
         plt.setp(ax1.get_xticklabels(), visible=False)
         plt.setp(ax2.get_xticklabels(), visible=False)
         plt.setp(ax3.get_xticklabels(), visible=False)
         plt.setp(ax4.get_xticklabels(), visible=False)
         plt.setp(ax5.get_xticklabels(), visible=False)
+        plt.setp(ax6.get_xticklabels(), visible=False)
         
         output_path = os.path.join(self.output_dir, f"gait_{metrics.gait_name}.png")
         fig.savefig(output_path, dpi=150, bbox_inches='tight')
