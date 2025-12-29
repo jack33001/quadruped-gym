@@ -22,16 +22,10 @@ from isaaclab.terrains.trimesh.mesh_terrains_cfg import (
 from isaaclab.utils import configclass
 
 
-##
-# Get absolute path to robot USD
-##
 QUADRUPED_GYM_DIR = os.path.dirname(os.path.abspath(__file__))
 QUADRUPED_USD_PATH = os.path.join(QUADRUPED_GYM_DIR, "Quadruped URDF", "QuadrupedUSD.usd")
 
 
-##
-# Default joint positions matching Genesis config
-##
 DEFAULT_JOINT_ANGLES = {
     "Front_Right_Hip": -0.6,
     "Front_Right_Knee": -0.2,
@@ -43,22 +37,37 @@ DEFAULT_JOINT_ANGLES = {
     "Rear_Left_Knee": -0.2,
 }
 
-# Target base height for ride height tracking
 TARGET_BASE_HEIGHT = 0.22
 
 
 ##
-# Custom observation functions for IMU data
+# Custom observation functions
 ##
 
 def imu_angular_velocity(env, sensor_cfg: SceneEntityCfg) -> torch.Tensor:
-    """Get angular velocity from IMU sensor (in body frame)."""
+    """Get angular velocity from IMU sensor in body frame.
+    
+    Args:
+        env: The environment instance.
+        sensor_cfg: Configuration specifying the IMU sensor name.
+        
+    Returns:
+        Angular velocity tensor of shape (num_envs, 3).
+    """
     imu_sensor = env.scene.sensors[sensor_cfg.name]
     return imu_sensor.data.ang_vel_b
 
 
 def imu_projected_gravity(env, sensor_cfg: SceneEntityCfg) -> torch.Tensor:
-    """Compute projected gravity from IMU orientation."""
+    """Compute gravity vector projected into body frame from IMU orientation.
+    
+    Args:
+        env: The environment instance.
+        sensor_cfg: Configuration specifying the IMU sensor name.
+        
+    Returns:
+        Projected gravity tensor of shape (num_envs, 3).
+    """
     imu_sensor = env.scene.sensors[sensor_cfg.name]
     quat = imu_sensor.data.quat_w
     
@@ -122,7 +131,17 @@ def left_terrain_cell(env, asset_cfg: SceneEntityCfg) -> torch.Tensor:
 ##
 
 def foot_slip_penalty(env, sensor_cfg: SceneEntityCfg, asset_cfg: SceneEntityCfg, threshold: float = 0.1) -> torch.Tensor:
-    """Penalize feet sliding on ground while in contact."""
+    """Penalize feet sliding on ground while in contact.
+    
+    Args:
+        env: The environment instance.
+        sensor_cfg: Configuration for foot contact sensor.
+        asset_cfg: Configuration for robot asset.
+        threshold: Minimum contact force to consider foot in contact.
+        
+    Returns:
+        Slip penalty tensor of shape (num_envs,).
+    """
     contact_sensor = env.scene.sensors[sensor_cfg.name]
     asset = env.scene[asset_cfg.name]
     
@@ -148,27 +167,18 @@ def foot_slip_penalty(env, sensor_cfg: SceneEntityCfg, asset_cfg: SceneEntityCfg
     return slip_penalty
 
 
-def distance_traveled_reward(env, asset_cfg: SceneEntityCfg) -> torch.Tensor:
-    """Reward for distance traveled from spawn point."""
-    asset = env.scene[asset_cfg.name]
-    root_pos = asset.data.root_pos_w
-    
-    if hasattr(env.scene, 'terrain') and env.scene.terrain is not None:
-        terrain = env.scene.terrain
-        if hasattr(terrain, 'env_origins'):
-            env_origins = terrain.env_origins
-            
-            dx = root_pos[:, 0] - env_origins[:, 0]
-            dy = root_pos[:, 1] - env_origins[:, 1]
-            distance = torch.sqrt(dx**2 + dy**2)
-            
-            return distance
-    
-    return torch.zeros(env.num_envs, device=env.device)
-
-
 def leg_contact_penalty(env, thigh_sensor_cfg: SceneEntityCfg, shin_sensor_cfg: SceneEntityCfg, threshold: float = 1.0) -> torch.Tensor:
-    """Penalize thigh and shin contacts with ground."""
+    """Penalize thigh and shin contacts with ground.
+    
+    Args:
+        env: The environment instance.
+        thigh_sensor_cfg: Configuration for thigh contact sensor.
+        shin_sensor_cfg: Configuration for shin contact sensor.
+        threshold: Force threshold above which to penalize.
+        
+    Returns:
+        Contact penalty tensor of shape (num_envs,).
+    """
     total_penalty = torch.zeros(env.num_envs, device=env.device)
     
     thigh_sensor = env.scene.sensors[thigh_sensor_cfg.name]
@@ -186,93 +196,14 @@ def leg_contact_penalty(env, thigh_sensor_cfg: SceneEntityCfg, shin_sensor_cfg: 
     return total_penalty
 
 
-def heading_tracking_reward(env, asset_cfg: SceneEntityCfg, std: float = 0.25) -> torch.Tensor:
-    """Reward for maintaining the initial heading (yaw) orientation."""
-    asset = env.scene[asset_cfg.name]
-    
-    quat = asset.data.root_quat_w
-    
-    w, x, y, z = quat[:, 0], quat[:, 1], quat[:, 2], quat[:, 3]
-    current_yaw = torch.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
-    
-    if not hasattr(env, '_target_heading'):
-        env._target_heading = current_yaw.clone()
-    
-    heading_error = current_yaw - env._target_heading
-    heading_error = torch.atan2(torch.sin(heading_error), torch.cos(heading_error))
-    
-    reward = torch.exp(-heading_error.pow(2) / (std * std))
-    
-    return reward
-
-
-def foot_air_time_reward(env, sensor_cfg: SceneEntityCfg, threshold: float = 0.25) -> torch.Tensor:
-    """Reward feet for being in the air, with diminishing returns after threshold."""
-    contact_sensor = env.scene.sensors[sensor_cfg.name]
-    
-    air_time = contact_sensor.data.current_air_time
-    
-    air_reward = threshold - air_time
-    
-    in_air = air_time > 0.0
-    
-    total_reward = torch.sum(air_reward * in_air.float(), dim=-1)
-    
-    return total_reward
-
-
-def foot_step_height_reward(env, sensor_cfg: SceneEntityCfg, asset_cfg: SceneEntityCfg, target_height: float = 0.05) -> torch.Tensor:
-    """Reward feet for lifting higher during swing phase."""
-    contact_sensor = env.scene.sensors[sensor_cfg.name]
-    asset = env.scene[asset_cfg.name]
-    
-    contact_forces = contact_sensor.data.net_forces_w
-    num_feet = contact_forces.shape[1]
-    in_contact = torch.norm(contact_forces, dim=-1) > 1.0
-    in_air = ~in_contact
-    
-    body_pos = asset.data.body_pos_w
-    
-    if body_pos.shape[1] >= num_feet:
-        foot_pos_z = body_pos[:, -num_feet:, 2]
-    else:
-        foot_pos_z = body_pos[:, :num_feet, 2]
-    
-    if not hasattr(env, '_foot_liftoff_z'):
-        env._foot_liftoff_z = foot_pos_z.clone()
-        env._foot_was_in_contact = in_contact.clone()
-    
-    just_lifted = env._foot_was_in_contact & in_air
-    
-    env._foot_liftoff_z = torch.where(just_lifted, foot_pos_z, env._foot_liftoff_z)
-    
-    height_above_liftoff = foot_pos_z - env._foot_liftoff_z
-    
-    height_error = height_above_liftoff - target_height
-    height_reward = torch.exp(-height_error.pow(2) / (0.02 * 0.02))
-    
-    total_reward = torch.sum(height_reward * in_air.float(), dim=-1)
-    
-    env._foot_was_in_contact = in_contact.clone()
-    
-    return total_reward
-
-
-def default_pose_reward(env, asset_cfg: SceneEntityCfg, std: float = 0.5) -> torch.Tensor:
-    """Reward for joint positions being close to default pose."""
-    asset = env.scene[asset_cfg.name]
-    
-    joint_pos_error = asset.data.joint_pos - asset.data.default_joint_pos
-    
-    error_norm = torch.norm(joint_pos_error, dim=-1)
-    
-    reward = torch.exp(-error_norm.pow(2) / (std * std))
-    
-    return reward
-
-
 def store_initial_heading(env, env_ids: torch.Tensor, asset_cfg: SceneEntityCfg):
-    """Event function to store initial heading after reset."""
+    """Event function to store initial heading after reset.
+    
+    Args:
+        env: The environment instance.
+        env_ids: Indices of environments being reset.
+        asset_cfg: Configuration for robot asset.
+    """
     asset = env.scene[asset_cfg.name]
     quat = asset.data.root_quat_w
     
@@ -286,14 +217,30 @@ def store_initial_heading(env, env_ids: torch.Tensor, asset_cfg: SceneEntityCfg)
 
 
 def joint_torque_penalty(env, asset_cfg: SceneEntityCfg) -> torch.Tensor:
-    """Penalize high joint torques (L2 norm)."""
+    """Penalize high joint torques (L2 norm).
+    
+    Args:
+        env: The environment instance.
+        asset_cfg: Configuration for robot asset.
+        
+    Returns:
+        Torque penalty tensor of shape (num_envs,).
+    """
     asset = env.scene[asset_cfg.name]
     torques = asset.data.applied_torque
     return torch.sum(torques.pow(2), dim=-1)
 
 
 def joint_jerk_penalty(env, asset_cfg: SceneEntityCfg) -> torch.Tensor:
-    """Penalize joint acceleration changes (jerk)."""
+    """Penalize joint acceleration changes (jerk).
+    
+    Args:
+        env: The environment instance.
+        asset_cfg: Configuration for robot asset.
+        
+    Returns:
+        Jerk penalty tensor of shape (num_envs,).
+    """
     asset = env.scene[asset_cfg.name]
     joint_acc = asset.data.joint_acc
     
@@ -308,7 +255,17 @@ def joint_jerk_penalty(env, asset_cfg: SceneEntityCfg) -> torch.Tensor:
 
 
 def ride_height_reward(env, asset_cfg: SceneEntityCfg, target_height: float = 0.22, std: float = 0.05) -> torch.Tensor:
-    """Reward for maintaining target base height."""
+    """Reward for maintaining target base height above terrain.
+    
+    Args:
+        env: The environment instance.
+        asset_cfg: Configuration for robot asset.
+        target_height: Desired height above terrain.
+        std: Standard deviation for exponential reward shaping.
+        
+    Returns:
+        Height reward tensor of shape (num_envs,).
+    """
     asset = env.scene[asset_cfg.name]
     root_pos = asset.data.root_pos_w
     
@@ -327,7 +284,16 @@ def ride_height_reward(env, asset_cfg: SceneEntityCfg, target_height: float = 0.
 
 
 def base_orientation_reward(env, asset_cfg: SceneEntityCfg, std: float = 0.25) -> torch.Tensor:
-    """Reward for keeping base level (roll and pitch near zero)."""
+    """Reward for keeping base level (roll and pitch near zero).
+    
+    Args:
+        env: The environment instance.
+        asset_cfg: Configuration for robot asset.
+        std: Standard deviation for exponential reward shaping.
+        
+    Returns:
+        Orientation reward tensor of shape (num_envs,).
+    """
     asset = env.scene[asset_cfg.name]
     quat = asset.data.root_quat_w
     
@@ -343,7 +309,16 @@ def base_orientation_reward(env, asset_cfg: SceneEntityCfg, std: float = 0.25) -
 
 
 def hip_position_reward(env, asset_cfg: SceneEntityCfg, std: float = 0.3) -> torch.Tensor:
-    """Reward for hip joint angles being close to default."""
+    """Reward for hip joint angles being close to default.
+    
+    Args:
+        env: The environment instance.
+        asset_cfg: Configuration for robot asset.
+        std: Standard deviation for exponential reward shaping.
+        
+    Returns:
+        Hip position reward tensor of shape (num_envs,).
+    """
     asset = env.scene[asset_cfg.name]
     
     joint_pos = asset.data.joint_pos
@@ -511,7 +486,7 @@ TERRAIN_CFG = TerrainGeneratorCfg(
 
 @configclass
 class QuadrupedSceneCfg(InteractiveSceneCfg):
-    """Configuration for quadruped scene with terrain."""
+    """Configuration for quadruped scene with procedural terrain."""
 
     terrain = TerrainImporterCfg(
         prim_path="/World/terrain",

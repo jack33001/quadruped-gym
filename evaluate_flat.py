@@ -35,8 +35,8 @@ class FlatGroundEvaluator(BaseEvaluator):
             evaluation_duration=eval_cfg.evaluation_duration,
         )
         self.eval_cfg = eval_cfg
-        self.video_dir = f"{self.log_dir}/videos_flat"
-        self.frames_dir = f"{self.log_dir}/frames_flat"
+        self.video_dir = f"{self.log_dir}/videos"
+        self.frames_dir = f"{self.log_dir}/frames"
 
     def create_env_cfg(self) -> QuadrupedEnvCfg:
         env_cfg = QuadrupedEnvCfg()

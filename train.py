@@ -2,7 +2,6 @@
 Training script for quadruped locomotion with Isaac Lab and RSL-RL.
 """
 import os
-import sys
 
 os.environ["PYTORCH_NVFUSER_DISABLE_FALLBACK"] = "1"
 os.environ["TORCH_ALLOW_TF32_CUBLAS_OVERRIDE"] = "1"

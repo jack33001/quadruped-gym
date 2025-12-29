@@ -17,7 +17,11 @@ from quadruped_env import IsaacLabVecEnvWrapper
 
 
 def setup_frame_capture():
-    """Setup frame capture using viewport."""
+    """Setup frame capture using viewport.
+    
+    Returns:
+        Viewport object if successful, None otherwise.
+    """
     try:
         from omni.kit.viewport.utility import get_active_viewport
         viewport = get_active_viewport()
@@ -31,7 +35,15 @@ def setup_frame_capture():
 
 
 def capture_frame(viewport, frame_path: str) -> bool:
-    """Capture a single frame from the viewport and save to disk."""
+    """Capture a single frame from the viewport and save to disk.
+    
+    Args:
+        viewport: The viewport to capture from.
+        frame_path: Path to save the captured frame.
+        
+    Returns:
+        True if capture succeeded, False otherwise.
+    """
     try:
         from omni.kit.viewport.utility import capture_viewport_to_file
         capture_viewport_to_file(viewport, frame_path)
@@ -41,7 +53,16 @@ def capture_frame(viewport, frame_path: str) -> bool:
 
 
 def frames_to_video(frames_dir: str, output_path: str, fps: int = 30) -> bool:
-    """Combine saved frames into a video using imageio."""
+    """Combine saved frames into a video using imageio.
+    
+    Args:
+        frames_dir: Directory containing frame images.
+        output_path: Path for output video file.
+        fps: Frames per second for output video.
+        
+    Returns:
+        True if video creation succeeded, False otherwise.
+    """
     try:
         import imageio
 
@@ -67,7 +88,16 @@ def frames_to_video(frames_dir: str, output_path: str, fps: int = 30) -> bool:
 
 
 def set_camera_view(isaac_env, eye: tuple, target: tuple) -> bool:
-    """Set camera position and look-at target using Isaac Lab's sim API."""
+    """Set camera position and look-at target.
+    
+    Args:
+        isaac_env: The Isaac environment instance.
+        eye: Camera position (x, y, z).
+        target: Look-at target position (x, y, z).
+        
+    Returns:
+        True if camera was set successfully, False otherwise.
+    """
     try:
         cam_eye = np.array(eye, dtype=float)
         cam_target = np.array(target, dtype=float)
@@ -83,7 +113,18 @@ def set_camera_view(isaac_env, eye: tuple, target: tuple) -> bool:
 
 
 def find_checkpoint(log_dir: str, checkpoint_name: str) -> str:
-    """Find checkpoint file, falling back to latest if specified not found."""
+    """Find checkpoint file, falling back to latest if specified not found.
+    
+    Args:
+        log_dir: Directory containing checkpoints.
+        checkpoint_name: Desired checkpoint filename.
+        
+    Returns:
+        Path to checkpoint file.
+        
+    Raises:
+        ValueError: If no checkpoints are found.
+    """
     checkpoint_path = os.path.join(log_dir, checkpoint_name)
     if os.path.exists(checkpoint_path):
         return checkpoint_path
@@ -99,7 +140,21 @@ def find_checkpoint(log_dir: str, checkpoint_name: str) -> str:
 
 
 def load_policy(log_dir: str, checkpoint_path: str, obs_dict, num_actions: int, device) -> ActorCritic:
-    """Load policy from checkpoint with architecture from saved config."""
+    """Load policy from checkpoint with architecture from saved config.
+    
+    Args:
+        log_dir: Directory containing config files.
+        checkpoint_path: Path to model checkpoint.
+        obs_dict: Observation dictionary for policy construction.
+        num_actions: Number of action dimensions.
+        device: Torch device.
+        
+    Returns:
+        Loaded and initialized ActorCritic policy.
+        
+    Raises:
+        KeyError: If checkpoint is missing model weights.
+    """
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
 
     try:
@@ -136,7 +191,7 @@ def load_policy(log_dir: str, checkpoint_path: str, obs_dict, num_actions: int, 
 
 
 def _default_policy_cfg() -> dict:
-    """Default policy configuration."""
+    """Default policy configuration for ActorCritic network."""
     return {
         "class_name": "ActorCritic",
         "activation": "lrelu",
@@ -176,34 +231,37 @@ class BaseEvaluator(ABC):
             "illegal_contact": 0,
             "unknown": 0,
         }
+        
+        self._frame_capture_failures = 0
+        self._max_frame_failures_to_report = 5
 
     @abstractmethod
     def create_env_cfg(self) -> QuadrupedEnvCfg:
-        """Create environment configuration. Override in subclasses."""
+        """Create environment configuration."""
         pass
 
     @abstractmethod
     def setup_environment(self, isaac_env):
-        """Setup environment-specific configuration. Override in subclasses."""
+        """Setup environment-specific configuration after creation."""
         pass
 
     @abstractmethod
     def setup_camera(self, isaac_env):
-        """Setup initial camera position. Override in subclasses."""
+        """Setup initial camera position."""
         pass
 
     def update_camera(self, isaac_env, step_count: int, total_steps: int):
-        """Update camera position during evaluation. Override if needed."""
+        """Update camera position during evaluation. Override for dynamic camera."""
         pass
 
     def get_video_filename(self) -> str:
-        """Get output video filename. Override in subclasses."""
+        """Get output video filename."""
         return "evaluation.mp4"
 
     def print_header(self, checkpoint_path: str, env_cfg: QuadrupedEnvCfg):
-        """Print evaluation header."""
+        """Print evaluation header information."""
         print("\n" + "=" * 80)
-        print(f"QUADRUPED POLICY EVALUATION")
+        print("QUADRUPED POLICY EVALUATION")
         print("=" * 80)
         print(f"Log directory: {self.log_dir}")
         print(f"Checkpoint: {checkpoint_path}")
@@ -213,7 +271,16 @@ class BaseEvaluator(ABC):
         print("=" * 80 + "\n")
 
     def classify_termination(self, env, idx: int, episode_length: float) -> str:
-        """Classify termination reason for an episode."""
+        """Classify termination reason for an episode.
+        
+        Args:
+            env: The wrapped environment.
+            idx: Environment index.
+            episode_length: Length of the episode in steps.
+            
+        Returns:
+            String describing the termination reason.
+        """
         isaac_env = env.unwrapped
         robot = isaac_env.scene["robot"]
 
@@ -240,7 +307,7 @@ class BaseEvaluator(ABC):
         return "unknown"
 
     def print_termination_summary(self):
-        """Print termination reasons summary."""
+        """Print summary of termination reasons."""
         print("\n" + "=" * 60)
         print("TERMINATION REASONS SUMMARY")
         print("=" * 60)
@@ -252,7 +319,7 @@ class BaseEvaluator(ABC):
         print("=" * 60)
 
     def print_summary(self, step_count: int, sim_dt: float, all_episode_rewards: list, all_episode_lengths: list, frame_count: int):
-        """Print evaluation summary."""
+        """Print final evaluation summary."""
         print("\n" + "=" * 80)
         print("EVALUATION SUMMARY")
         print("=" * 80)
@@ -266,10 +333,16 @@ class BaseEvaluator(ABC):
             print(f"Min reward: {np.min(all_episode_rewards):.2f}")
         if self.record_video and frame_count > 0:
             print(f"Video saved to: {self.video_dir}/{self.get_video_filename()}")
+        if self._frame_capture_failures > 0:
+            print(f"Frame capture failures: {self._frame_capture_failures}")
         print("=" * 80)
 
     def run(self, simulation_app):
-        """Run the evaluation loop."""
+        """Run the evaluation loop.
+        
+        Args:
+            simulation_app: The Isaac Sim application instance.
+        """
         from isaaclab.envs import ManagerBasedRLEnv
 
         if not os.path.exists(self.log_dir):
@@ -333,6 +406,10 @@ class BaseEvaluator(ABC):
                         frame_path = os.path.join(self.frames_dir, f"frame_{frame_count:06d}.png")
                         if capture_frame(viewport, frame_path):
                             frame_count += 1
+                        else:
+                            self._frame_capture_failures += 1
+                            if self._frame_capture_failures <= self._max_frame_failures_to_report:
+                                print(f"Warning: Frame capture failed at step {step_count}")
 
                 episode_rewards += rewards
                 episode_lengths += 1
