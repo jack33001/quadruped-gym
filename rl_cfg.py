@@ -2,10 +2,10 @@
 RL configuration for quadruped locomotion training.
 
 Contains rewards, terminations, observations, actions, commands, events,
-training hyperparameters, and curriculum settings.
+and environment configuration using Isaac Lab @configclass decorators.
 """
 import math
-from dataclasses import dataclass, field
+from dataclasses import field
 
 from isaaclab.envs import ManagerBasedRLEnvCfg
 from isaaclab.managers import EventTermCfg, ObservationGroupCfg, ObservationTermCfg
@@ -27,6 +27,15 @@ from sim_cfg import (
     base_orientation_reward,
     hip_position_reward,
 )
+
+from train_cfg import SensorCfg, EvalCfg, RewardWeightsCfg, TrainCfg
+
+
+##
+# Sensor and Scaling Configuration
+##
+
+SENSOR_CFG = SensorCfg()
 
 
 ##
@@ -57,14 +66,17 @@ class ObservationsCfg:
         base_ang_vel = ObservationTermCfg(
             func=imu_angular_velocity,
             params={"sensor_cfg": SceneEntityCfg("imu")},
-            scale=0.25,
+            scale=SENSOR_CFG.angular_velocity_scale,
         )
 
         # Joint positions (relative to default)
         joint_pos = ObservationTermCfg(func=mdp.joint_pos_rel, scale=1.0)
 
         # Joint velocities
-        joint_vel = ObservationTermCfg(func=mdp.joint_vel_rel, scale=0.05)
+        joint_vel = ObservationTermCfg(
+            func=mdp.joint_vel_rel, 
+            scale=SENSOR_CFG.joint_velocity_scale
+        )
 
         # Last actions
         last_action = ObservationTermCfg(func=mdp.last_action)
@@ -208,7 +220,7 @@ class RewardsCfg:
         params={
             "sensor_cfg": SceneEntityCfg("foot_contact"),
             "asset_cfg": SceneEntityCfg("robot"),
-            "threshold": 0.1,
+            "threshold": SENSOR_CFG.slip_velocity_threshold,
         },
     )
 
@@ -251,7 +263,7 @@ class RewardsCfg:
         params={
             "thigh_sensor_cfg": SceneEntityCfg("thigh_contact"),
             "shin_sensor_cfg": SceneEntityCfg("shin_contact"),
-            "threshold": 1.0,
+            "threshold": SENSOR_CFG.leg_contact_threshold,
         },
     )
 
@@ -276,7 +288,7 @@ class TerminationsCfg:
         func=mdp.illegal_contact,
         params={
             "sensor_cfg": SceneEntityCfg("torso_contact"),
-            "threshold": 10.0,
+            "threshold": SENSOR_CFG.torso_contact_threshold,
         },
     )
 
@@ -296,6 +308,8 @@ class QuadrupedEnvCfg(ManagerBasedRLEnvCfg):
     events: EventCfg = EventCfg()
     rewards: RewardsCfg = RewardsCfg()
     terminations: TerminationsCfg = TerminationsCfg()
+    
+    sensor: SensorCfg = field(default_factory=SensorCfg)
 
     def __post_init__(self):
         """Post initialization."""
@@ -305,84 +319,3 @@ class QuadrupedEnvCfg(ManagerBasedRLEnvCfg):
         self.episode_length_s = 10.0
         self.viewer.eye = (8.0, 8.0, 5.0)
         self.viewer.lookat = (0.0, 0.0, 0.0)
-
-
-@dataclass
-class RewardWeightsCfg:
-    """Grouped reward weights with master and sub-weights."""
-    
-    # Master group weights
-    efficiency_weight: float = .001
-    velocity_weight: float = 1.0
-    gait_tracking_weight: float = .005
-    stability_weight: float = 1.0
-    
-    # Efficiency sub-weights
-    joint_jerk: float = -0.0001
-    joint_torque: float = -0.00001
-    action_smoothness: float = -0.001
-    
-    # Velocity tracking sub-weights
-    velocity_tracking: float = 2.0
-    
-    # Gait scheduler tracking sub-weights (applied in wrapper)
-    foot_contact_tracking: float = 0.06
-    step_height_tracking: float = 0.2
-    
-    # Stability sub-weights
-    foot_slip: float = -0.05
-    body_rates: float = -0.05
-    base_orientation: float = 0.2
-    ride_height: float = 0.3
-    hip_position: float = 0.5
-    leg_collision: float = -0.1
-
-
-##
-# Training Configuration
-##
-
-@dataclass
-class TrainCfg:
-    """RSL-RL training configuration."""
-
-    experiment_name: str = "quadruped_gait"
-    run_name: str = ""
-    max_iterations: int = 250
-    save_interval: int = 50
-    log_interval: int = 1
-    seed: int = 42
-    num_steps_per_env: int = 24
-    empirical_normalization: bool = False
-    headless: bool = True
-
-    obs_groups: dict = field(default_factory=lambda: {
-        "policy": ["policy"],
-        "critic": ["policy"],
-    })
-
-    algorithm: dict = field(default_factory=lambda: {
-        "class_name": "PPO",
-        "clip_param": 0.2,
-        "desired_kl": 0.01,
-        "entropy_coef": 0.01,
-        "gamma": 0.99,
-        "lam": 0.95,
-        "learning_rate": 3e-4,
-        "max_grad_norm": 1.0,
-        "num_learning_epochs": 5,
-        "num_mini_batches": 4,
-        "schedule": "adaptive",
-        "use_clipped_value_loss": True,
-        "value_loss_coef": 1.0,
-    })
-
-    policy: dict = field(default_factory=lambda: {
-        "class_name": "ActorCritic",
-        "activation": "lrelu",
-        "actor_hidden_dims": [512, 256, 128],
-        "critic_hidden_dims": [512, 256, 128],
-        "init_noise_std": 0.5,
-    })
-
-    reward_weights: RewardWeightsCfg = field(default_factory=RewardWeightsCfg)

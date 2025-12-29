@@ -22,7 +22,8 @@ from isaaclab.envs import ManagerBasedRLEnv
 
 from rsl_rl.runners import OnPolicyRunner
 
-from rl_cfg import QuadrupedEnvCfg, TrainCfg, RewardWeightsCfg
+from rl_cfg import QuadrupedEnvCfg
+from train_cfg import TrainCfg, RewardWeightsCfg
 from quadruped_env import IsaacLabVecEnvWrapper
 
 
@@ -61,11 +62,11 @@ def apply_reward_weights(env, reward_weights: RewardWeightsCfg):
 class GaitRewardWrapper(IsaacLabVecEnvWrapper):
     """Wrapper that adds gait tracking rewards to the environment rewards."""
     
-    def __init__(self, env, reward_weights: RewardWeightsCfg):
+    def __init__(self, env, reward_weights: RewardWeightsCfg, sensor_cfg=None):
         self.reward_weights = reward_weights
         self._episode_sums = None
         self._prev_isaac_episode_sums = None
-        super().__init__(env)
+        super().__init__(env, sensor_cfg=sensor_cfg)
         
         self._episode_sums = {
             "gait_foot_contact": torch.zeros(self.num_envs, device=self.device),
@@ -150,7 +151,8 @@ class GaitRewardWrapper(IsaacLabVecEnvWrapper):
         
         foot_contact_sensor = isaac_env.scene.sensors["foot_contact"]
         contact_forces = foot_contact_sensor.data.net_forces_w
-        actual_contacts = (torch.norm(contact_forces, dim=-1) > 1.0).float()
+        contact_threshold = self.sensor_cfg.foot_contact_threshold
+        actual_contacts = (torch.norm(contact_forces, dim=-1) > contact_threshold).float()
         
         contact_match = 1.0 - torch.abs(desired_contacts - actual_contacts)
         contact_reward = torch.mean(contact_match, dim=-1)
@@ -225,7 +227,7 @@ def main():
 
     isaac_env = ManagerBasedRLEnv(cfg=env_cfg)
     
-    env = GaitRewardWrapper(isaac_env, train_cfg.reward_weights)
+    env = GaitRewardWrapper(isaac_env, train_cfg.reward_weights, sensor_cfg=train_cfg.sensor)
 
     apply_reward_weights(env, train_cfg.reward_weights)
 

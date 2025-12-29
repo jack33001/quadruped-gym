@@ -7,33 +7,20 @@ import math
 os.environ["PYTORCH_NVFUSER_DISABLE_FALLBACK"] = "1"
 os.environ["TORCH_ALLOW_TF32_CUBLAS_OVERRIDE"] = "1"
 
-# Configuration - edit these values as needed
-HEADLESS = False  # Set to False to see visualization and capture frames
-RECORD_VIDEO = True  # Enable video recording via frame capture
-EXPERIMENT_NAME = "quadruped_walking"
-VIDEO_FPS = 30
-CHECKPOINT = "model_399.pt"
-
-# Camera pan configuration
-CAMERA_PAN_DURATION = 10.0  # Duration of camera pan in seconds
-CAMERA_HEIGHT = 5.0  # Height above terrain
-CAMERA_LOOK_AHEAD = 15.0  # Distance ahead to look (larger = shallower angle)
-CAMERA_TARGET_HEIGHT = 0.0  # Height of look-at target above ground
-SPOTLIGHT_HEIGHT = 15.0  # Height of overhead spotlight
-SPOTLIGHT_INTENSITY = 5000.0  # Spotlight intensity
-
 from isaaclab.app import AppLauncher
 
-# Create app launcher
-app_launcher = AppLauncher(
-    headless=HEADLESS,
-)
+from train_cfg import TrainCfg
+
+TRAIN_CFG = TrainCfg()
+EVAL_CFG = TRAIN_CFG.eval
+
+app_launcher = AppLauncher(headless=EVAL_CFG.headless)
 simulation_app = app_launcher.app
 
-# Now we can import Isaac Lab modules
 import torch
 
 from rl_cfg import QuadrupedEnvCfg
+from sim_cfg import QuadrupedSceneCfg
 from evaluate_base import BaseEvaluator, set_camera_view
 
 
@@ -70,7 +57,7 @@ def get_terrain_bounds(env):
     }
 
 
-def create_spotlight(isaac_env):
+def create_spotlight(isaac_env, intensity: float):
     """Create an overhead spotlight."""
     try:
         import omni.usd
@@ -81,7 +68,7 @@ def create_spotlight(isaac_env):
         light_prim = stage.DefinePrim(light_path, "SphereLight")
 
         sphere_light = UsdLux.SphereLight(light_prim)
-        sphere_light.CreateIntensityAttr(SPOTLIGHT_INTENSITY)
+        sphere_light.CreateIntensityAttr(intensity)
         sphere_light.CreateRadiusAttr(2.0)
         sphere_light.CreateColorAttr(Gf.Vec3f(1.0, 0.95, 0.9))
         sphere_light.CreateEnableColorTemperatureAttr(False)
@@ -155,15 +142,17 @@ def distribute_robots_across_terrain(isaac_env, num_rows: int, num_cols: int):
 class RoughTerrainEvaluator(BaseEvaluator):
     """Evaluator for rough terrain environments with camera panning."""
 
-    def __init__(self):
+    def __init__(self, train_cfg: TrainCfg):
+        eval_cfg = train_cfg.eval
         super().__init__(
-            experiment_name=EXPERIMENT_NAME,
-            checkpoint=CHECKPOINT,
-            headless=HEADLESS,
-            record_video=RECORD_VIDEO,
-            video_fps=VIDEO_FPS,
-            evaluation_duration=CAMERA_PAN_DURATION,
+            experiment_name=train_cfg.experiment_name,
+            checkpoint=f"model_{train_cfg.max_iterations - 1}.pt",
+            headless=eval_cfg.headless,
+            record_video=eval_cfg.record_video,
+            video_fps=eval_cfg.video_fps,
+            evaluation_duration=eval_cfg.camera_pan_duration,
         )
+        self.eval_cfg = eval_cfg
         self.pan_config = None
         self.spotlight_path = None
         self.num_rows = 6
@@ -171,6 +160,7 @@ class RoughTerrainEvaluator(BaseEvaluator):
 
     def create_env_cfg(self) -> QuadrupedEnvCfg:
         env_cfg = QuadrupedEnvCfg()
+        env_cfg.scene = QuadrupedSceneCfg(num_envs=1, env_spacing=2.5)
 
         terrain_cfg = env_cfg.scene.terrain.terrain_generator
         self.num_rows = terrain_cfg.num_rows
@@ -185,7 +175,7 @@ class RoughTerrainEvaluator(BaseEvaluator):
 
     def setup_environment(self, isaac_env):
         distribute_robots_across_terrain(isaac_env, self.num_rows, self.num_cols)
-        self.spotlight_path = create_spotlight(isaac_env)
+        self.spotlight_path = create_spotlight(isaac_env, self.eval_cfg.spotlight_intensity)
 
     def setup_camera(self, isaac_env):
         terrain = isaac_env.scene.terrain
@@ -212,12 +202,16 @@ class RoughTerrainEvaluator(BaseEvaluator):
         dir_x = dx / dist if dist > 0.001 else 1.0
         dir_y = dy / dist if dist > 0.001 else 0.0
 
+        cam_height = self.eval_cfg.camera_pan_height
+        look_ahead = self.eval_cfg.camera_look_ahead
+        target_height = self.eval_cfg.camera_target_height
+
         self.pan_config = {
-            "start_pos": (first_cell_x, first_cell_y, CAMERA_HEIGHT),
-            "end_pos": (last_cell_x - dir_x * CAMERA_LOOK_AHEAD, last_cell_y - dir_y * CAMERA_LOOK_AHEAD, CAMERA_HEIGHT),
+            "start_pos": (first_cell_x, first_cell_y, cam_height),
+            "end_pos": (last_cell_x - dir_x * look_ahead, last_cell_y - dir_y * look_ahead, cam_height),
             "look_dir": (dir_x, dir_y),
-            "look_ahead": CAMERA_LOOK_AHEAD,
-            "target_height": CAMERA_TARGET_HEIGHT,
+            "look_ahead": look_ahead,
+            "target_height": target_height,
         }
 
         print(f"Camera pan: {self.pan_config['start_pos']} -> {self.pan_config['end_pos']}")
@@ -226,14 +220,14 @@ class RoughTerrainEvaluator(BaseEvaluator):
             isaac_env,
             eye=self.pan_config["start_pos"],
             target=(
-                self.pan_config["start_pos"][0] + dir_x * CAMERA_LOOK_AHEAD,
-                self.pan_config["start_pos"][1] + dir_y * CAMERA_LOOK_AHEAD,
-                CAMERA_TARGET_HEIGHT
+                self.pan_config["start_pos"][0] + dir_x * look_ahead,
+                self.pan_config["start_pos"][1] + dir_y * look_ahead,
+                target_height
             )
         )
 
         if self.spotlight_path:
-            update_spotlight(self.spotlight_path, first_cell_x, first_cell_y, SPOTLIGHT_HEIGHT)
+            update_spotlight(self.spotlight_path, first_cell_x, first_cell_y, self.eval_cfg.spotlight_height)
 
     def update_camera(self, isaac_env, step_count: int, total_steps: int):
         if self.pan_config is None:
@@ -246,15 +240,15 @@ class RoughTerrainEvaluator(BaseEvaluator):
 
         eye_x = start[0] + (end[0] - start[0]) * progress
         eye_y = start[1] + (end[1] - start[1]) * progress
-        eye_z = CAMERA_HEIGHT
+        eye_z = self.eval_cfg.camera_pan_height
 
-        target_x = eye_x + look_dir[0] * CAMERA_LOOK_AHEAD
-        target_y = eye_y + look_dir[1] * CAMERA_LOOK_AHEAD
+        target_x = eye_x + look_dir[0] * self.eval_cfg.camera_look_ahead
+        target_y = eye_y + look_dir[1] * self.eval_cfg.camera_look_ahead
 
-        set_camera_view(isaac_env, eye=(eye_x, eye_y, eye_z), target=(target_x, target_y, CAMERA_TARGET_HEIGHT))
+        set_camera_view(isaac_env, eye=(eye_x, eye_y, eye_z), target=(target_x, target_y, self.eval_cfg.camera_target_height))
 
         if self.spotlight_path:
-            update_spotlight(self.spotlight_path, eye_x, eye_y, SPOTLIGHT_HEIGHT)
+            update_spotlight(self.spotlight_path, eye_x, eye_y, self.eval_cfg.spotlight_height)
 
     def get_video_filename(self) -> str:
         return "evaluation.mp4"
@@ -274,5 +268,5 @@ class RoughTerrainEvaluator(BaseEvaluator):
 
 
 if __name__ == "__main__":
-    evaluator = RoughTerrainEvaluator()
+    evaluator = RoughTerrainEvaluator(TRAIN_CFG)
     evaluator.run(simulation_app)

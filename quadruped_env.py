@@ -16,9 +16,14 @@ class IsaacLabVecEnvWrapper(VecEnv):
     Wrapper to make Isaac Lab ManagerBasedRLEnv compatible with RSL-RL.
     """
 
-    def __init__(self, env: ManagerBasedRLEnv):
+    def __init__(self, env: ManagerBasedRLEnv, sensor_cfg=None):
         """Initialize wrapper."""
         self._env = env
+        
+        if sensor_cfg is None:
+            from train_cfg import SensorCfg
+            sensor_cfg = SensorCfg()
+        self.sensor_cfg = sensor_cfg
         
         # VecEnv required attributes
         self.num_envs = env.num_envs
@@ -186,8 +191,8 @@ class IsaacLabVecEnvWrapper(VecEnv):
         # Store current state as previous before stepping
         ang_vel, projected_gravity, joint_pos, joint_vel = self._get_robot_state()
         
-        # Clip actions for safety
-        actions = torch.clamp(actions, -5.0, 5.0)
+        clip_val = self.sensor_cfg.action_clip_value
+        actions = torch.clamp(actions, -clip_val, clip_val)
         
         if torch.isnan(actions).any():
             actions = torch.nan_to_num(actions, nan=0.0)
@@ -286,11 +291,14 @@ class IsaacLabVecEnvWrapper(VecEnv):
         # Get gait scheduler outputs
         contact_states, foot_heights = self.gait_scheduler.get_gait_obs()
         
+        ang_vel_scale = self.sensor_cfg.angular_velocity_scale
+        joint_vel_scale = self.sensor_cfg.joint_velocity_scale
+        
         # Get previous state (scaled consistently with current state)
-        prev_ang_vel = self._prev_imu_ang_vel * 0.25
+        prev_ang_vel = self._prev_imu_ang_vel * ang_vel_scale
         prev_proj_grav = self._prev_imu_projected_gravity
         prev_joint_pos = self._prev_joint_pos
-        prev_joint_vel = self._prev_joint_vel * 0.05
+        prev_joint_vel = self._prev_joint_vel * joint_vel_scale
         
         # Phase oscillator observation (sin and cos for continuity)
         phase_obs = torch.stack([
@@ -310,14 +318,14 @@ class IsaacLabVecEnvWrapper(VecEnv):
             phase_obs,
         ], dim=-1)
         
-        # Clip observations to reasonable range
-        policy_obs = torch.clamp(policy_obs, -100.0, 100.0)
+        clip_val = self.sensor_cfg.obs_clip_value
+        policy_obs = torch.clamp(policy_obs, -clip_val, clip_val)
         
         if torch.isnan(policy_obs).any() or torch.isinf(policy_obs).any():
             self._nan_obs_count += 1
             if self._nan_obs_count <= 5:
                 print(f"WARNING: NaN/Inf in observations (count: {self._nan_obs_count})")
-            policy_obs = torch.nan_to_num(policy_obs, nan=0.0, posinf=100.0, neginf=-100.0)
+            policy_obs = torch.nan_to_num(policy_obs, nan=0.0, posinf=clip_val, neginf=-clip_val)
         
         return TensorDict({
             "policy": policy_obs
