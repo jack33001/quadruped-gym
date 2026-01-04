@@ -123,6 +123,26 @@ def imu_projected_gravity(env, sensor_cfg: SceneEntityCfg) -> torch.Tensor:
     return compute_projected_gravity(imu_sensor.data.quat_w)
 
 
+def base_pos_z(env, asset_cfg: SceneEntityCfg) -> torch.Tensor:
+    """Get base height (z position)."""
+    asset = env.scene[asset_cfg.name]
+    return asset.data.root_pos_w[:, 2:3]
+
+
+def foot_contact(env, sensor_cfg: SceneEntityCfg, threshold: float = 1.0) -> torch.Tensor:
+    """Get binary foot contact state based on contact force threshold."""
+    contact_sensor = env.scene.sensors[sensor_cfg.name]
+    contact_forces = contact_sensor.data.net_forces_w
+    contact_magnitude = torch.norm(contact_forces, dim=-1)
+    return (contact_magnitude > threshold).float()
+
+
+def applied_torque(env, asset_cfg: SceneEntityCfg) -> torch.Tensor:
+    """Get applied joint torques."""
+    asset = env.scene[asset_cfg.name]
+    return asset.data.applied_torque
+
+
 ##
 # Custom termination functions
 ##
@@ -351,16 +371,15 @@ def base_orientation_reward(env, asset_cfg: SceneEntityCfg, std: float = 0.25) -
     return reward
 
 
-def hip_position_reward(env, asset_cfg: SceneEntityCfg, std: float = 0.3) -> torch.Tensor:
-    """Reward for hip joint angles being close to default.
+def hip_position_penalty(env, asset_cfg: SceneEntityCfg) -> torch.Tensor:
+    """Penalize hip joint angles deviating from default position.
     
     Args:
         env: The environment instance.
         asset_cfg: Configuration for robot asset.
-        std: Standard deviation for exponential reward shaping.
         
     Returns:
-        Hip position reward tensor of shape (num_envs,).
+        Hip position penalty tensor of shape (num_envs,).
     """
     asset = env.scene[asset_cfg.name]
     
@@ -374,9 +393,7 @@ def hip_position_reward(env, asset_cfg: SceneEntityCfg, std: float = 0.3) -> tor
         if idx < joint_pos.shape[1]:
             hip_error += (joint_pos[:, idx] - default_pos[:, idx]).pow(2)
     
-    reward = torch.exp(-hip_error / (std * std))
-    
-    return reward
+    return hip_error
 
 
 ##
@@ -435,7 +452,7 @@ class FlatGroundSceneCfg(InteractiveSceneCfg):
 
     ground = AssetBaseCfg(
         prim_path="/World/ground",
-        spawn=sim_utils.GroundPlaneCfg(size=(100.0, 100.0)),
+        spawn=sim_utils.GroundPlaneCfg(),
     )
 
     robot: ArticulationCfg = QUADRUPED_CFG

@@ -19,7 +19,6 @@ simulation_app = app_launcher.app
 from rl_cfg import QuadrupedEnvCfg
 from sim_cfg import FlatGroundSceneCfg
 from evaluate_base import BaseEvaluator, set_camera_view
-from plot_utils import PerformanceRecorder
 from gait_cfg import GaitType, GAIT_PARAMS
 
 
@@ -39,7 +38,6 @@ class FlatGroundEvaluator(BaseEvaluator):
         self.eval_cfg = eval_cfg
         self.video_dir = f"{self.log_dir}/videos"
         self.frames_dir = f"{self.log_dir}/frames"
-        self.plots_dir = f"{self.log_dir}/plots_flat"
 
     def create_env_cfg(self) -> QuadrupedEnvCfg:
         env_cfg = QuadrupedEnvCfg()
@@ -61,23 +59,8 @@ class FlatGroundEvaluator(BaseEvaluator):
             target=(0.0, 0.0, 0.0)
         )
 
-    def setup_performance_recording(self, env) -> PerformanceRecorder:
-        """Setup recording with one environment per gait type."""
-        gait_scheduler = env.gait_scheduler
-        
-        all_gait_names = [GAIT_PARAMS[gt].name for gt in GaitType]
-        num_gaits = len(all_gait_names)
-        
-        for i in range(min(num_gaits, env.num_envs)):
-            gait_scheduler.gait_types[i] = i
-        
-        env_indices = list(range(min(num_gaits, env.num_envs)))
-        gait_names = all_gait_names[:len(env_indices)]
-        
-        print(f"Recording performance for gaits: {gait_names}")
-        print(f"  Environment indices: {env_indices}")
-        
-        return PerformanceRecorder(gait_names, env_indices, env.device)
+    def setup_performance_recording(self, env):
+        return None
 
     def get_video_filename(self) -> str:
         return "evaluation_flat.mp4"
@@ -89,10 +72,10 @@ class FlatGroundEvaluator(BaseEvaluator):
         print(f"Log directory: {self.log_dir}")
         print(f"Checkpoint: {checkpoint_path}")
         print(f"Num environments: {env_cfg.scene.num_envs}")
+        print(f"Velocity range: 0.0 to 2.0 m/s")
         print(f"Evaluation duration: {self.evaluation_duration}s")
         print(f"Headless: {self.headless}")
         print(f"Record video: {self.record_video}")
-        print(f"Performance plots will be saved to: {self.plots_dir}")
         print("=" * 80 + "\n")
 
 

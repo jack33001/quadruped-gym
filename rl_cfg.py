@@ -18,6 +18,9 @@ from sim_cfg import (
     FlatGroundSceneCfg,
     imu_angular_velocity,
     imu_projected_gravity,
+    base_pos_z,
+    foot_contact,
+    applied_torque,
     foot_slip_penalty,
     leg_contact_penalty,
     store_initial_heading,
@@ -25,7 +28,7 @@ from sim_cfg import (
     joint_jerk_penalty,
     ride_height_reward,
     base_orientation_reward,
-    hip_position_reward,
+    hip_position_penalty,
 )
 
 from train_cfg import SensorCfg, EvalCfg, RewardWeightsCfg, TrainCfg
@@ -80,6 +83,27 @@ class ObservationsCfg:
 
         # Last actions
         last_action = ObservationTermCfg(func=mdp.last_action)
+
+        # Base height
+        base_height = ObservationTermCfg(
+            func=base_pos_z,
+            params={"asset_cfg": SceneEntityCfg("robot")},
+        )
+
+        # Foot contact states
+        foot_contact = ObservationTermCfg(
+            func=foot_contact,
+            params={
+                "sensor_cfg": SceneEntityCfg("foot_contact"),
+                "threshold": SENSOR_CFG.foot_contact_threshold,
+            },
+        )
+
+        # Joint torques
+        joint_torques = ObservationTermCfg(
+            func=applied_torque,
+            params={"asset_cfg": SceneEntityCfg("robot")},
+        )
 
         def __post_init__(self):
             self.enable_corruption = False
@@ -249,11 +273,10 @@ class RewardsCfg:
     )
 
     hip_position = RewardTermCfg(
-        func=hip_position_reward,
+        func=hip_position_penalty,
         weight=1.0,
         params={
             "asset_cfg": SceneEntityCfg("robot"),
-            "std": 0.3,
         },
     )
 

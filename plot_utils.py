@@ -27,6 +27,8 @@ class PerformanceMetrics:
     joint_torques: list = field(default_factory=list)
     foot_contacts_actual: list = field(default_factory=list)
     foot_contacts_desired: list = field(default_factory=list)
+    foot_positions_actual: list = field(default_factory=list)
+    foot_positions_desired: list = field(default_factory=list)
     ride_height: list = field(default_factory=list)
     
     _cumulative_energy: float = 0.0
@@ -71,8 +73,9 @@ class PerformanceRecorder:
         root_pos = robot.data.root_pos_w
         applied_torques = robot.data.applied_torque
         joint_vel = robot.data.joint_vel
+        body_pos = robot.data.body_pos_w
         
-        desired_contacts, _ = gait_scheduler.get_gait_obs()
+        desired_contacts, desired_foot_xy, desired_heights = gait_scheduler.get_gait_obs()
         
         foot_contact_sensor = isaac_env.scene.sensors["foot_contact"]
         contact_forces = foot_contact_sensor.data.net_forces_w
@@ -83,6 +86,12 @@ class PerformanceRecorder:
         velocity_cmd = None
         if hasattr(cmd_manager, 'get_command'):
             velocity_cmd = cmd_manager.get_command("base_velocity")
+        
+        num_feet = 4
+        if body_pos.shape[1] >= num_feet:
+            foot_pos_world = body_pos[:, -num_feet:, :]
+        else:
+            foot_pos_world = body_pos[:, :num_feet, :]
         
         for gait_name, env_idx in zip(self.gait_names, self.env_indices):
             metric = self.metrics[gait_name]
@@ -119,6 +128,11 @@ class PerformanceRecorder:
             metric.foot_contacts_actual.append(actual_contacts[idx].cpu().numpy().copy())
             metric.foot_contacts_desired.append(desired_contacts[idx].cpu().numpy().copy())
             
+            actual_foot_pos = foot_pos_world[idx].cpu().numpy().copy()
+            desired_foot_pos = torch.cat([desired_foot_xy[idx], desired_heights[idx].unsqueeze(-1)], dim=-1).cpu().numpy().copy()
+            metric.foot_positions_actual.append(actual_foot_pos)
+            metric.foot_positions_desired.append(desired_foot_pos)
+            
             terrain_height = 0.0
             if hasattr(isaac_env.scene, 'terrain') and isaac_env.scene.terrain is not None:
                 terrain = isaac_env.scene.terrain
@@ -143,6 +157,8 @@ class PerformanceRecorder:
             m.joint_torques.clear()
             m.foot_contacts_actual.clear()
             m.foot_contacts_desired.clear()
+            m.foot_positions_actual.clear()
+            m.foot_positions_desired.clear()
             m.ride_height.clear()
             m._cumulative_energy = 0.0
 
@@ -198,7 +214,7 @@ class PerformancePlotter:
         avg_cmd_vel = np.mean(metrics.commanded_velocity) if metrics.commanded_velocity else 0.0
         
         fig = plt.figure(figsize=(16, 24))
-        gs = fig.add_gridspec(7, 1, hspace=0.3)
+        gs = fig.add_gridspec(8, 1, hspace=0.3)
         
         fig.suptitle(f"Gait: {metrics.gait_name} | Commanded Velocity: {avg_cmd_vel:.2f} m/s", 
                      fontsize=14, fontweight='bold')

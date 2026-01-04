@@ -282,6 +282,7 @@ class RoughTerrainEvaluator(BaseEvaluator):
         print(f"Checkpoint: {checkpoint_path}")
         print(f"Terrain grid: {self.num_rows} rows x {self.num_cols} cols")
         print(f"Terrain mode: Random (non-curriculum)")
+        print(f"Velocity range: 0.0 to 2.0 m/s")
         print(f"Camera pan duration: {self.evaluation_duration}s")
         print(f"Headless: {self.headless}")
         print(f"Record video: {self.record_video}")

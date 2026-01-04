@@ -64,7 +64,7 @@ class GaitRewardWrapper(IsaacLabVecEnvWrapper):
     REWARD_CATEGORIES = {
         "Efficiency": ["joint_jerk", "joint_torque", "action_smoothness"],
         "Velocity": ["velocity_tracking"],
-        "Gait_Tracking": ["gait_foot_contact", "gait_step_height"],
+        "Gait_Tracking": ["gait_foot_contact", "gait_foot_trajectory"],
         "Stability": ["foot_slip", "body_rates", "base_orientation", "ride_height", "hip_position", "leg_collision"],
     }
     
@@ -72,14 +72,20 @@ class GaitRewardWrapper(IsaacLabVecEnvWrapper):
         self.reward_weights = reward_weights
         self._episode_sums = None
         self._prev_isaac_episode_sums = None
+        self._velocity_error_sum = None
+        self._velocity_error_count = None
+        
         super().__init__(env, sensor_cfg=sensor_cfg)
         
         self._episode_sums = {
             "gait_foot_contact": torch.zeros(self.num_envs, device=self.device),
-            "gait_step_height": torch.zeros(self.num_envs, device=self.device),
+            "gait_foot_trajectory": torch.zeros(self.num_envs, device=self.device),
         }
         
         self._prev_isaac_episode_sums = {}
+        
+        self._velocity_error_sum = torch.zeros(self.num_envs, device=self.device)
+        self._velocity_error_count = torch.zeros(self.num_envs, device=self.device)
     
     def reset(self):
         """Reset and clear episode sums."""
@@ -88,6 +94,10 @@ class GaitRewardWrapper(IsaacLabVecEnvWrapper):
             for key in self._episode_sums:
                 self._episode_sums[key].zero_()
         self._prev_isaac_episode_sums = {}
+        if self._velocity_error_sum is not None:
+            self._velocity_error_sum.zero_()
+        if self._velocity_error_count is not None:
+            self._velocity_error_count.zero_()
         return obs
     
     def _get_category_for_reward(self, reward_name: str) -> str:
@@ -134,7 +144,11 @@ class GaitRewardWrapper(IsaacLabVecEnvWrapper):
         rewards = rewards + gait_rewards
         
         self._episode_sums["gait_foot_contact"] += gait_components["foot_contact"]
-        self._episode_sums["gait_step_height"] += gait_components["step_height"]
+        self._episode_sums["gait_foot_trajectory"] += gait_components["foot_trajectory"]
+        
+        velocity_error = self._compute_velocity_error()
+        self._velocity_error_sum += velocity_error
+        self._velocity_error_count += 1
         
         if "log" not in extras:
             extras["log"] = {}
@@ -144,7 +158,10 @@ class GaitRewardWrapper(IsaacLabVecEnvWrapper):
             done_mask = dones.float()
             
             extras["log"]["Episode_Reward/gait_foot_contact"] = (self._episode_sums["gait_foot_contact"] * done_mask).sum().item() / max(num_dones, 1)
-            extras["log"]["Episode_Reward/gait_step_height"] = (self._episode_sums["gait_step_height"] * done_mask).sum().item() / max(num_dones, 1)
+            extras["log"]["Episode_Reward/gait_foot_trajectory"] = (self._episode_sums["gait_foot_trajectory"] * done_mask).sum().item() / max(num_dones, 1)
+            
+            avg_vel_error = self._velocity_error_sum / self._velocity_error_count.clamp(min=1)
+            extras["log"]["Metrics/avg_velocity_error"] = (avg_vel_error * done_mask).sum().item() / max(num_dones, 1)
             
             for key in self._episode_sums:
                 self._episode_sums[key] = torch.where(
@@ -152,6 +169,9 @@ class GaitRewardWrapper(IsaacLabVecEnvWrapper):
                     torch.zeros_like(self._episode_sums[key]),
                     self._episode_sums[key]
                 )
+            
+            self._velocity_error_sum = torch.where(dones, torch.zeros_like(self._velocity_error_sum), self._velocity_error_sum)
+            self._velocity_error_count = torch.where(dones, torch.zeros_like(self._velocity_error_count), self._velocity_error_count)
         
         extras = self._reorganize_reward_logs(extras)
         
@@ -162,7 +182,7 @@ class GaitRewardWrapper(IsaacLabVecEnvWrapper):
         gait_scheduler = self.gait_scheduler
         isaac_env = self._env
         
-        desired_contacts, desired_heights = gait_scheduler.get_gait_obs()
+        desired_contacts, desired_foot_xy, desired_heights = gait_scheduler.get_gait_obs()
         
         foot_contact_sensor = isaac_env.scene.sensors["foot_contact"]
         contact_forces = foot_contact_sensor.data.net_forces_w
@@ -174,38 +194,112 @@ class GaitRewardWrapper(IsaacLabVecEnvWrapper):
         
         robot = isaac_env.scene["robot"]
         body_pos = robot.data.body_pos_w
+        root_pos = robot.data.root_pos_w
+        root_quat = robot.data.root_quat_w
         num_feet = 4
         
         if body_pos.shape[1] >= num_feet:
-            foot_pos_z = body_pos[:, -num_feet:, 2]
+            foot_pos_world = body_pos[:, -num_feet:, :]
         else:
-            foot_pos_z = body_pos[:, :num_feet, 2]
+            foot_pos_world = body_pos[:, :num_feet, :]
+        
+        foot_pos_local = self._world_to_body_frame(foot_pos_world, root_pos, root_quat)
         
         terrain_height = torch.zeros(self.num_envs, device=self.device)
+        if hasattr(isaac_env.scene, 'terrain') and isaac_env.scene.terrain is not None:
+            terrain = isaac_env.scene.terrain
+            if hasattr(terrain, 'env_origins'):
+                terrain_height = terrain.env_origins[:, 2]
         
-        foot_heights_above_ground = foot_pos_z - terrain_height.unsqueeze(-1)
-        foot_heights_above_ground = torch.clamp(foot_heights_above_ground, min=0.0)
+        foot_z_local = foot_pos_world[:, :, 2] - terrain_height.unsqueeze(-1)
+        foot_z_local = torch.clamp(foot_z_local, min=0.0)
         
-        height_error = torch.abs(foot_heights_above_ground - desired_heights)
-        height_reward = torch.exp(-height_error.pow(2) / (0.02 * 0.02))
-        height_reward = torch.mean(height_reward, dim=-1)
+        xy_error = foot_pos_local[:, :, :2] - desired_foot_xy
+        xy_error_sq = (xy_error ** 2).sum(dim=-1)
+        
+        z_error = foot_z_local - desired_heights
+        z_error_sq = z_error ** 2
+        
+        total_error_sq = xy_error_sq + z_error_sq
+        trajectory_reward = torch.exp(-total_error_sq / (0.02 * 0.02))
+        trajectory_reward = torch.mean(trajectory_reward, dim=-1)
         
         gait_weight = self.reward_weights.gait_tracking_weight
         contact_weight = self.reward_weights.foot_contact_tracking
-        step_height_weight = self.reward_weights.step_height_tracking
+        trajectory_weight = self.reward_weights.foot_trajectory_tracking
         
         weighted_contact = gait_weight * contact_weight * contact_reward
-        weighted_height = gait_weight * step_height_weight * height_reward
+        weighted_trajectory = gait_weight * trajectory_weight * trajectory_reward
         
-        total_reward = weighted_contact + weighted_height
+        total_reward = weighted_contact + weighted_trajectory
         
         reward_components = {
             "foot_contact": weighted_contact,
-            "step_height": weighted_height,
+            "foot_trajectory": weighted_trajectory,
         }
         
         return total_reward, reward_components
-
+    
+    def _compute_velocity_error(self) -> torch.Tensor:
+        """Compute velocity tracking error as percentage of commanded velocity."""
+        isaac_env = self._env
+        robot = isaac_env.scene["robot"]
+        cmd_manager = isaac_env.command_manager
+        
+        actual_vel = robot.data.root_lin_vel_w[:, :2]
+        
+        if hasattr(cmd_manager, 'get_command'):
+            velocity_cmd = cmd_manager.get_command("base_velocity")
+            if velocity_cmd is not None:
+                commanded_vel = velocity_cmd[:, :2]
+                commanded_magnitude = torch.norm(commanded_vel, dim=-1)
+                error_magnitude = torch.norm(commanded_vel - actual_vel, dim=-1)
+                
+                percent_error = torch.where(
+                    commanded_magnitude > 0.01,
+                    100.0 * error_magnitude / commanded_magnitude,
+                    torch.zeros_like(error_magnitude)
+                )
+                return percent_error
+        
+        return torch.zeros(self.num_envs, device=self.device)
+    
+    def _world_to_body_frame(self, points_world: torch.Tensor, root_pos: torch.Tensor, root_quat: torch.Tensor) -> torch.Tensor:
+        """Transform points from world frame to body frame.
+        
+        Args:
+            points_world: Points in world frame (num_envs, num_points, 3)
+            root_pos: Root position (num_envs, 3)
+            root_quat: Root quaternion (num_envs, 4) in (w, x, y, z) order
+            
+        Returns:
+            Points in body frame (num_envs, num_points, 3)
+        """
+        points_rel = points_world - root_pos.unsqueeze(1)
+        
+        w, x, y, z = root_quat[:, 0], root_quat[:, 1], root_quat[:, 2], root_quat[:, 3]
+        
+        inv_w = w
+        inv_x = -x
+        inv_y = -y
+        inv_z = -z
+        
+        num_points = points_rel.shape[1]
+        points_body = torch.zeros_like(points_rel)
+        
+        for i in range(num_points):
+            px, py, pz = points_rel[:, i, 0], points_rel[:, i, 1], points_rel[:, i, 2]
+            
+            t0 = inv_w * px + inv_y * pz - inv_z * py
+            t1 = inv_w * py + inv_z * px - inv_x * pz
+            t2 = inv_w * pz + inv_x * py - inv_y * px
+            t3 = -inv_x * px - inv_y * py - inv_z * pz
+            
+            points_body[:, i, 0] = t0 * inv_w - t3 * inv_x - t1 * inv_z + t2 * inv_y
+            points_body[:, i, 1] = t1 * inv_w - t3 * inv_y - t2 * inv_x + t0 * inv_z
+            points_body[:, i, 2] = t2 * inv_w - t3 * inv_z - t0 * inv_y + t1 * inv_x
+        
+        return points_body
 
 def get_rsl_rl_cfg(train_cfg: TrainCfg, num_envs: int):
     """Convert TrainCfg to RSL-RL config dictionary."""

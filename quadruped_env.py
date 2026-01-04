@@ -52,18 +52,22 @@ class IsaacLabVecEnvWrapper(VecEnv):
         self._prev_imu_projected_gravity = None
         self._prev_joint_pos = None
         self._prev_joint_vel = None
+        self._prev_joint_torques = None
+        self._prev_foot_contacts = None
         
         # Store last observation for get_observations()
         self._last_obs = None
         
         # Calculate observation dimension
         # Base: commands(3) + projected_gravity(3) + ang_vel(3) + joint_pos(8) + joint_vel(8) + last_action(8) = 33
+        # New base observations: base_height(1) + foot_contact(4) + joint_torques(8) = 13
         # Prev state: prev_ang_vel(3) + prev_projected_gravity(3) + prev_joint_pos(8) + prev_joint_vel(8) = 22
-        # Gait: contact_states(4) + foot_heights(4) = 8
+        # New prev state: prev_joint_torques(8) + prev_foot_contacts(4) = 12
+        # Gait: contact_states(4) + foot_xy_positions(8) + foot_heights(4) = 16
         # Phase oscillator: sin(phase) + cos(phase) = 2
-        # Total additional: 32
+        # Total additional: 22 + 12 + 16 + 2 = 52
         base_obs_dim = env.observation_manager.group_obs_dim["policy"][0]
-        self.num_obs = base_obs_dim + 22 + 8 + 2
+        self.num_obs = base_obs_dim + 22 + 12 + 16 + 2
         
         # Debug counters
         self._nan_obs_count = 0
@@ -139,28 +143,41 @@ class IsaacLabVecEnvWrapper(VecEnv):
         robot = self._env.scene["robot"]
         joint_pos = (robot.data.joint_pos - robot.data.default_joint_pos).clone()
         joint_vel = robot.data.joint_vel.clone()
+        joint_torques = robot.data.applied_torque.clone()
         
-        return ang_vel, projected_gravity, joint_pos, joint_vel
+        # Get foot contact state
+        foot_contact_sensor = self._env.scene.sensors["foot_contact"]
+        contact_forces = foot_contact_sensor.data.net_forces_w
+        contact_threshold = self.sensor_cfg.foot_contact_threshold
+        foot_contacts = (torch.norm(contact_forces, dim=-1) > contact_threshold).float()
+        
+        return ang_vel, projected_gravity, joint_pos, joint_vel, joint_torques, foot_contacts
 
-    def _init_prev_state(self, ang_vel, projected_gravity, joint_pos, joint_vel):
+    def _init_prev_state(self, ang_vel, projected_gravity, joint_pos, joint_vel, joint_torques, foot_contacts):
         """Initialize previous state buffers with current state."""
         self._prev_imu_ang_vel = ang_vel.clone()
         self._prev_imu_projected_gravity = projected_gravity.clone()
         self._prev_joint_pos = joint_pos.clone()
         self._prev_joint_vel = joint_vel.clone()
+        self._prev_joint_torques = joint_torques.clone()
+        self._prev_foot_contacts = foot_contacts.clone()
 
-    def _update_prev_state(self, ang_vel, projected_gravity, joint_pos, joint_vel, reset_ids=None):
+    def _update_prev_state(self, ang_vel, projected_gravity, joint_pos, joint_vel, joint_torques, foot_contacts, reset_ids=None):
         """Update previous state buffers."""
         if reset_ids is not None and len(reset_ids) > 0:
             self._prev_imu_ang_vel[reset_ids] = ang_vel[reset_ids]
             self._prev_imu_projected_gravity[reset_ids] = projected_gravity[reset_ids]
             self._prev_joint_pos[reset_ids] = joint_pos[reset_ids]
             self._prev_joint_vel[reset_ids] = joint_vel[reset_ids]
+            self._prev_joint_torques[reset_ids] = joint_torques[reset_ids]
+            self._prev_foot_contacts[reset_ids] = foot_contacts[reset_ids]
         else:
             self._prev_imu_ang_vel = ang_vel.clone()
             self._prev_imu_projected_gravity = projected_gravity.clone()
             self._prev_joint_pos = joint_pos.clone()
             self._prev_joint_vel = joint_vel.clone()
+            self._prev_joint_torques = joint_torques.clone()
+            self._prev_foot_contacts = foot_contacts.clone()
 
     def _apply_velocity_deadzone(self):
         """Apply deadzone to velocity commands, pushing values away from zero."""
@@ -212,8 +229,8 @@ class IsaacLabVecEnvWrapper(VecEnv):
         self.episode_length_buf.zero_()
         
         # Get current state and initialize previous state buffers
-        ang_vel, projected_gravity, joint_pos, joint_vel = self._get_robot_state()
-        self._init_prev_state(ang_vel, projected_gravity, joint_pos, joint_vel)
+        ang_vel, projected_gravity, joint_pos, joint_vel, joint_torques, foot_contacts = self._get_robot_state()
+        self._init_prev_state(ang_vel, projected_gravity, joint_pos, joint_vel, joint_torques, foot_contacts)
         
         self._last_obs = self._convert_obs(obs_dict)
         return self._last_obs
@@ -221,7 +238,7 @@ class IsaacLabVecEnvWrapper(VecEnv):
     def step(self, actions):
         """Step the environment."""
         # Store current state as previous before stepping
-        ang_vel, projected_gravity, joint_pos, joint_vel = self._get_robot_state()
+        ang_vel, projected_gravity, joint_pos, joint_vel, joint_torques, foot_contacts = self._get_robot_state()
         
         clip_val = self.sensor_cfg.action_clip_value
         actions = torch.clamp(actions, -clip_val, clip_val)
@@ -233,13 +250,17 @@ class IsaacLabVecEnvWrapper(VecEnv):
         
         self._apply_velocity_deadzone()
         
-        # Update gait scheduler with current velocity command
+        # Update gait scheduler with current velocity command and body velocity
         cmd_manager = self._env.command_manager
+        robot = self._env.scene["robot"]
+        
         if hasattr(cmd_manager, 'get_command'):
             velocity_cmd = cmd_manager.get_command("base_velocity")
-            if velocity_cmd is not None and velocity_cmd.shape[-1] >= 1:
-                forward_vel = velocity_cmd[:, 0]
-                self.gait_scheduler.set_commanded_velocity(forward_vel)
+            if velocity_cmd is not None:
+                self.gait_scheduler.set_commanded_velocity(velocity_cmd)
+        
+        current_vel = robot.data.root_lin_vel_w[:, :2]
+        self.gait_scheduler.set_current_velocity(current_vel)
         
         # Advance gait scheduler
         self.gait_scheduler.step(self.sim_dt)
@@ -287,8 +308,8 @@ class IsaacLabVecEnvWrapper(VecEnv):
             self.episode_steps[dones] = 0.0
             
             # Reset previous state for done envs
-            new_ang_vel, new_proj_grav, new_joint_pos, new_joint_vel = self._get_robot_state()
-            self._update_prev_state(new_ang_vel, new_proj_grav, new_joint_pos, new_joint_vel, done_indices)
+            new_ang_vel, new_proj_grav, new_joint_pos, new_joint_vel, new_joint_torques, new_foot_contacts = self._get_robot_state()
+            self._update_prev_state(new_ang_vel, new_proj_grav, new_joint_pos, new_joint_vel, new_joint_torques, new_foot_contacts, done_indices)
         
         # Update previous state (for non-reset envs, this happened before step)
         non_done_mask = ~dones
@@ -300,6 +321,8 @@ class IsaacLabVecEnvWrapper(VecEnv):
             self._prev_imu_projected_gravity[non_done_ids] = projected_gravity[non_done_ids]
             self._prev_joint_pos[non_done_ids] = joint_pos[non_done_ids]
             self._prev_joint_vel[non_done_ids] = joint_vel[non_done_ids]
+            self._prev_joint_torques[non_done_ids] = joint_torques[non_done_ids]
+            self._prev_foot_contacts[non_done_ids] = foot_contacts[non_done_ids]
         
         # Convert observations
         self._last_obs = self._convert_obs(obs_dict)
@@ -331,8 +354,8 @@ class IsaacLabVecEnvWrapper(VecEnv):
         """Convert Isaac Lab obs dict to TensorDict for RSL-RL."""
         policy_obs = obs_dict["policy"].float().contiguous()
         
-        # Get gait scheduler outputs
-        contact_states, foot_heights = self.gait_scheduler.get_gait_obs()
+        # Get gait scheduler outputs (now includes xy positions)
+        contact_states, foot_xy_positions, foot_heights = self.gait_scheduler.get_gait_obs()
         
         ang_vel_scale = self.sensor_cfg.angular_velocity_scale
         joint_vel_scale = self.sensor_cfg.joint_velocity_scale
@@ -342,12 +365,17 @@ class IsaacLabVecEnvWrapper(VecEnv):
         prev_proj_grav = self._prev_imu_projected_gravity
         prev_joint_pos = self._prev_joint_pos
         prev_joint_vel = self._prev_joint_vel * joint_vel_scale
+        prev_joint_torques = self._prev_joint_torques
+        prev_foot_contacts = self._prev_foot_contacts
         
         # Phase oscillator observation (sin and cos for continuity)
         phase_obs = torch.stack([
             torch.sin(self.gait_phase),
             torch.cos(self.gait_phase)
         ], dim=-1)
+        
+        # Flatten foot_xy_positions from (num_envs, 4, 2) to (num_envs, 8)
+        foot_xy_flat = foot_xy_positions.reshape(self.num_envs, -1)
         
         # Concatenate all observations
         policy_obs = torch.cat([
@@ -356,7 +384,10 @@ class IsaacLabVecEnvWrapper(VecEnv):
             prev_proj_grav,
             prev_joint_pos,
             prev_joint_vel,
+            prev_joint_torques,
+            prev_foot_contacts,
             contact_states,
+            foot_xy_flat,
             foot_heights,
             phase_obs,
         ], dim=-1)
@@ -386,3 +417,14 @@ class IsaacLabVecEnvWrapper(VecEnv):
     def unwrapped(self):
         """Return unwrapped environment."""
         return self._env
+
+    def print_episode_length_stats(self):
+        """Print statistics about episode_length_buf for debugging."""
+        buf = self.episode_length_buf
+        print(f"\nEpisode Length Buffer Stats:")
+        print(f"  Min: {buf.min().item()}")
+        print(f"  Max: {buf.max().item()}")
+        print(f"  Mean: {buf.float().mean().item():.1f}")
+        print(f"  Std: {buf.float().std().item():.1f}")
+        print(f"  Unique values: {len(buf.unique())}")
+        print(f"  Max episode length: {self.max_episode_length}")

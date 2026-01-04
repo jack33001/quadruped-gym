@@ -14,7 +14,6 @@ from rsl_rl.modules import ActorCritic
 
 from rl_cfg import QuadrupedEnvCfg
 from quadruped_env import IsaacLabVecEnvWrapper
-from plot_utils import PerformanceRecorder, PerformancePlotter
 
 
 def setup_frame_capture():
@@ -224,7 +223,6 @@ class BaseEvaluator(ABC):
         self.log_dir = f"logs/{experiment_name}"
         self.video_dir = f"{self.log_dir}/videos"
         self.frames_dir = f"{self.log_dir}/frames"
-        self.plots_dir = f"{self.log_dir}/plots"
 
         self.termination_counts = {
             "time_out": 0,
@@ -236,9 +234,6 @@ class BaseEvaluator(ABC):
         
         self._frame_capture_failures = 0
         self._max_frame_failures_to_report = 5
-        
-        self.performance_recorder = None
-        self.performance_plotter = None
 
     @abstractmethod
     def create_env_cfg(self) -> QuadrupedEnvCfg:
@@ -263,7 +258,7 @@ class BaseEvaluator(ABC):
         """Get output video filename."""
         return "evaluation.mp4"
 
-    def setup_performance_recording(self, env) -> PerformanceRecorder:
+    def setup_performance_recording(self, env):
         """Setup performance recording for metrics plotting.
         
         Override to customize which gaits/environments to record.
@@ -275,44 +270,7 @@ class BaseEvaluator(ABC):
         Returns:
             PerformanceRecorder instance or None to disable recording.
         """
-        gait_scheduler = env.gait_scheduler
-        gait_names = gait_scheduler.get_current_gait_names()
-        
-        recorded_gaits = {}
-        for idx, name in enumerate(gait_names):
-            if name not in recorded_gaits:
-                recorded_gaits[name] = idx
-        
-        if not recorded_gaits:
-            return None
-        
-        gait_list = list(recorded_gaits.keys())
-        env_indices = list(recorded_gaits.values())
-        
-        print(f"Recording performance for gaits: {gait_list}")
-        print(f"  Environment indices: {env_indices}")
-        
-        return PerformanceRecorder(gait_list, env_indices, env.device)
-
-    def record_performance(self, env, sim_time: float):
-        """Record performance metrics at current timestep.
-        
-        Args:
-            env: The wrapped environment.
-            sim_time: Current simulation time.
-        """
-        if self.performance_recorder is not None:
-            self.performance_recorder.record(env, sim_time)
-
-    def generate_plots(self):
-        """Generate and save performance plots."""
-        if self.performance_recorder is None:
-            return
-        
-        os.makedirs(self.plots_dir, exist_ok=True)
-        self.performance_plotter = PerformancePlotter(self.plots_dir)
-        self.performance_plotter.plot_all(self.performance_recorder)
-        print(f"\nPerformance plots saved to: {self.plots_dir}")
+        return None
 
     def print_header(self, checkpoint_path: str, env_cfg: QuadrupedEnvCfg):
         """Print evaluation header information."""
@@ -374,7 +332,8 @@ class BaseEvaluator(ABC):
                 print(f"  {reason}: {count} ({pct:.1f}%)")
         print("=" * 60)
 
-    def print_summary(self, step_count: int, sim_dt: float, all_episode_rewards: list, all_episode_lengths: list, frame_count: int):
+    def print_summary(self, step_count: int, sim_dt: float, all_episode_rewards: list, 
+                      all_episode_lengths: list, frame_count: int):
         """Print final evaluation summary."""
         print("\n" + "=" * 80)
         print("EVALUATION SUMMARY")
@@ -391,9 +350,17 @@ class BaseEvaluator(ABC):
             print(f"Video saved to: {self.video_dir}/{self.get_video_filename()}")
         if self._frame_capture_failures > 0:
             print(f"Frame capture failures: {self._frame_capture_failures}")
-        if self.performance_recorder is not None:
-            print(f"Performance plots saved to: {self.plots_dir}")
         print("=" * 80)
+
+    def setup_velocity_commands(self, env_cfg: QuadrupedEnvCfg):
+        """Setup velocity command range for evaluation.
+        
+        Override to customize velocity ranges.
+        Default: 0 to 2 m/s forward velocity.
+        """
+        env_cfg.commands.base_velocity.ranges.lin_vel_x = (0.0, 2.0)
+        env_cfg.commands.base_velocity.ranges.lin_vel_y = (0.0, 0.0)
+        env_cfg.commands.base_velocity.ranges.ang_vel_z = (0.0, 0.0)
 
     def run(self, simulation_app):
         """Run the evaluation loop.
@@ -408,6 +375,7 @@ class BaseEvaluator(ABC):
 
         checkpoint_path = find_checkpoint(self.log_dir, self.checkpoint)
         env_cfg = self.create_env_cfg()
+        self.setup_velocity_commands(env_cfg)
         self.print_header(checkpoint_path, env_cfg)
 
         isaac_env = ManagerBasedRLEnv(cfg=env_cfg)
@@ -430,8 +398,6 @@ class BaseEvaluator(ABC):
         obs_dict = env.reset()
         policy = load_policy(self.log_dir, checkpoint_path, obs_dict, env.num_actions, env.device)
         print("Policy loaded successfully\n")
-        
-        self.performance_recorder = self.setup_performance_recording(env)
 
         print("Running evaluation...")
         if not self.headless:
@@ -458,9 +424,6 @@ class BaseEvaluator(ABC):
                     actions = policy.act_inference(obs_dict)
 
                 obs_dict, rewards, dones, extras = env.step(actions)
-                
-                sim_time = step_count * sim_dt
-                self.record_performance(env, sim_time)
 
                 self.update_camera(isaac_env, step_count, total_steps)
 
@@ -502,8 +465,6 @@ class BaseEvaluator(ABC):
             print("\n\nEvaluation interrupted by user")
 
         self.print_termination_summary()
-        
-        self.generate_plots()
 
         if self.record_video and frame_count > 0:
             print(f"\nCaptured {frame_count} frames")

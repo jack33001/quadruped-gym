@@ -2,7 +2,8 @@
 Gait configuration and scheduler for quadruped locomotion.
 
 Defines gait patterns (trot, bound, pronk, etc.) with per-leg phase offsets,
-stance/swing durations, and provides a deterministic gait scheduler.
+stance/swing durations, and provides a deterministic gait scheduler with
+Raibert heuristic foot placement.
 """
 import torch
 from dataclasses import dataclass
@@ -93,22 +94,28 @@ class GaitSchedulerCfg:
     randomize_gait: bool = True
     
     base_velocity: float = 1.0
-    min_cycle_scale: float = 0.5
-    max_cycle_scale: float = 1.5
+    min_cycle_scale: float = 0.75
+    max_cycle_scale: float = 1.25
     
     allow_gait_switching: bool = True
     min_gait_switch_interval: float = 1.5
     gait_switch_probability: float = 0.002
+    
+    # Raibert heuristic parameters
+    raibert_gain: float = 0.3
+    hip_offset_x: float = 0.1
+    hip_offset_y: float = 0.08
+    
+    # Leg order: [front_right, front_left, rear_right, rear_left]
+    # Signs: (x_sign, y_sign) where positive x is forward, positive y is left
+    leg_signs: tuple = ((1, -1), (1, 1), (-1, -1), (-1, 1))
 
 
 class GaitScheduler:
-    """Deterministic gait scheduler.
+    """Deterministic gait scheduler with Raibert heuristic foot placement.
     
-    Manages per-leg phases and outputs desired contact states and foot heights
-    based on the current gait type and phase progression.
-    
-    Cycle duration scales with commanded velocity - faster commands result in
-    shorter cycle times (faster stepping).
+    Manages per-leg phases and outputs desired contact states and foot positions
+    based on the current gait type, phase progression, and velocity commands.
     """
     
     def __init__(self, num_envs: int, device: torch.device, cfg: GaitSchedulerCfg = None):
@@ -119,11 +126,24 @@ class GaitScheduler:
         self.leg_phases = torch.zeros(num_envs, self.cfg.num_legs, device=device)
         self.gait_types = torch.zeros(num_envs, dtype=torch.long, device=device)
         
-        self.commanded_velocity = torch.ones(num_envs, device=device) * self.cfg.base_velocity
+        self.commanded_velocity = torch.zeros(num_envs, 3, device=device)
+        self.commanded_velocity[:, 0] = self.cfg.base_velocity
+        
+        self.current_velocity = torch.zeros(num_envs, 3, device=device)
         
         self.time_since_gait_switch = torch.zeros(num_envs, device=device)
         
+        self._setup_hip_positions()
         self._cache_gait_params()
+    
+    def _setup_hip_positions(self):
+        """Setup nominal hip positions relative to body center."""
+        leg_signs = torch.tensor(self.cfg.leg_signs, device=self.device, dtype=torch.float)
+        
+        self.hip_positions = torch.zeros(self.cfg.num_legs, 3, device=self.device)
+        self.hip_positions[:, 0] = leg_signs[:, 0] * self.cfg.hip_offset_x
+        self.hip_positions[:, 1] = leg_signs[:, 1] * self.cfg.hip_offset_y
+        self.hip_positions[:, 2] = 0.0
     
     def _cache_gait_params(self):
         """Pre-compute gait parameters as tensors for fast lookup."""
@@ -146,7 +166,7 @@ class GaitScheduler:
         """Get velocity-scaled cycle durations for each environment."""
         base_durations = self.base_cycle_durations[self.gait_types]
         
-        velocity_magnitude = torch.abs(self.commanded_velocity)
+        velocity_magnitude = torch.norm(self.commanded_velocity[:, :2], dim=-1)
         
         scale = self.cfg.base_velocity / velocity_magnitude.clamp(min=0.1)
         scale = scale.clamp(self.cfg.min_cycle_scale, self.cfg.max_cycle_scale)
@@ -154,15 +174,34 @@ class GaitScheduler:
         return base_durations * scale
     
     def set_commanded_velocity(self, velocity: torch.Tensor):
-        """Update the commanded velocity for cycle duration scaling.
+        """Update the commanded velocity for trajectory computation.
         
         Args:
-            velocity: Forward velocity command (num_envs,) or scalar
+            velocity: Velocity command tensor. Can be:
+                - (num_envs,) for forward velocity only
+                - (num_envs, 2) for x, y velocity
+                - (num_envs, 3) for x, y, yaw velocity
         """
-        if velocity.dim() == 0:
-            self.commanded_velocity.fill_(velocity.item())
+        if velocity.dim() == 1:
+            self.commanded_velocity[:, 0] = velocity
+            self.commanded_velocity[:, 1] = 0.0
+            self.commanded_velocity[:, 2] = 0.0
+        elif velocity.shape[-1] == 2:
+            self.commanded_velocity[:, :2] = velocity
+            self.commanded_velocity[:, 2] = 0.0
         else:
             self.commanded_velocity = velocity.clone()
+    
+    def set_current_velocity(self, velocity: torch.Tensor):
+        """Update the current body velocity for Raibert heuristic.
+        
+        Args:
+            velocity: Current velocity tensor (num_envs, 3) for x, y, yaw.
+        """
+        if velocity.dim() == 1:
+            self.current_velocity[:, 0] = velocity
+        elif velocity.shape[-1] >= 2:
+            self.current_velocity[:, :velocity.shape[-1]] = velocity[:, :3] if velocity.shape[-1] > 3 else velocity
     
     def reset(self, env_ids: torch.Tensor = None, randomize_gait: bool = None):
         """Reset phases for specified environments."""
@@ -174,6 +213,7 @@ class GaitScheduler:
         
         self.leg_phases[env_ids] = 0.0
         self.time_since_gait_switch[env_ids] = 0.0
+        self.current_velocity[env_ids] = 0.0
         
         should_randomize = randomize_gait if randomize_gait is not None else self.cfg.randomize_gait
         
@@ -226,14 +266,45 @@ class GaitScheduler:
         contact_states = (effective_phase < duty).float()
         return contact_states
     
-    def get_foot_heights(self) -> torch.Tensor:
-        """Get desired foot height for each leg.
+    def _compute_raibert_foothold(self) -> torch.Tensor:
+        """Compute desired foot positions using Raibert heuristic.
         
-        During stance: height = 0
-        During swing: height follows parabolic trajectory with apex at swing_height
+        The Raibert heuristic places feet at:
+            p_foot = p_hip + v_current * T_stance/2 + K * (v_current - v_desired)
         
         Returns:
-            Tensor of shape (num_envs, num_legs) with desired heights.
+            Tensor of shape (num_envs, num_legs, 3) with desired foot positions
+            in body frame.
+        """
+        duty = self.duty_factors[self.gait_types]
+        cycle_dur = self.cycle_durations
+        stance_duration = duty * cycle_dur
+        
+        v_current = self.current_velocity[:, :2]
+        v_desired = self.commanded_velocity[:, :2]
+        
+        velocity_offset = v_current * (stance_duration.unsqueeze(-1) / 2.0)
+        
+        velocity_error = v_current - v_desired
+        feedback_offset = self.cfg.raibert_gain * velocity_error
+        
+        total_offset = velocity_offset + feedback_offset
+        
+        foot_positions = self.hip_positions.unsqueeze(0).expand(self.num_envs, -1, -1).clone()
+        
+        foot_positions[:, :, 0] += total_offset[:, 0:1]
+        foot_positions[:, :, 1] += total_offset[:, 1:2]
+        
+        return foot_positions
+    
+    def get_foot_positions(self) -> torch.Tensor:
+        """Get desired foot positions for each leg.
+        
+        During stance: foot at Raibert touchdown position, z = 0
+        During swing: foot follows trajectory from liftoff to next touchdown
+        
+        Returns:
+            Tensor of shape (num_envs, num_legs, 3) with desired positions.
         """
         offsets = self.phase_offsets[self.gait_types]
         effective_phase = (self.leg_phases + offsets) % 1.0
@@ -249,18 +320,52 @@ class GaitScheduler:
         )
         swing_progress = swing_progress.clamp(0.0, 1.0)
         
-        foot_heights = 4.0 * self.cfg.swing_height * swing_progress * (1.0 - swing_progress)
-        foot_heights = torch.where(in_swing, foot_heights, torch.zeros_like(foot_heights))
+        touchdown_positions = self._compute_raibert_foothold()
         
-        return foot_heights
+        liftoff_positions = self.hip_positions.unsqueeze(0).expand(self.num_envs, -1, -1).clone()
+        
+        interp = swing_progress.unsqueeze(-1)
+        xy_positions = liftoff_positions * (1.0 - interp) + touchdown_positions * interp
+        
+        z_height = 4.0 * self.cfg.swing_height * swing_progress * (1.0 - swing_progress)
+        
+        foot_positions = xy_positions.clone()
+        foot_positions[:, :, 2] = torch.where(
+            in_swing,
+            z_height,
+            torch.zeros_like(z_height)
+        )
+        
+        return foot_positions
     
-    def get_gait_obs(self) -> tuple[torch.Tensor, torch.Tensor]:
+    def get_foot_heights(self) -> torch.Tensor:
+        """Get desired foot height for each leg (z component only).
+        
+        Returns:
+            Tensor of shape (num_envs, num_legs) with desired heights.
+        """
+        return self.get_foot_positions()[:, :, 2]
+    
+    def get_foot_xy_positions(self) -> torch.Tensor:
+        """Get desired foot x, y positions for each leg.
+        
+        Returns:
+            Tensor of shape (num_envs, num_legs, 2) with desired x, y positions.
+        """
+        return self.get_foot_positions()[:, :, :2]
+    
+    def get_gait_obs(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Get gait scheduler outputs for observation.
         
         Returns:
-            Tuple of (contact_states, foot_heights), each (num_envs, num_legs).
+            Tuple of (contact_states, foot_xy_positions, foot_heights):
+                - contact_states: (num_envs, num_legs)
+                - foot_xy_positions: (num_envs, num_legs, 2)
+                - foot_heights: (num_envs, num_legs)
         """
-        return self.get_contact_states(), self.get_foot_heights()
+        contact_states = self.get_contact_states()
+        foot_positions = self.get_foot_positions()
+        return contact_states, foot_positions[:, :, :2], foot_positions[:, :, 2]
     
     def get_current_gait_names(self) -> list[str]:
         """Get human-readable gait names for each environment."""
