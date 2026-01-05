@@ -13,4 +13,8 @@ echo "Training complete. Starting gait evaluation..."
 python evaluate_gait.py
 
 echo ""
+echo "Gait evaluation complete. Starting plot and table generation..."
+python evaluate_flat.py
+
+echo ""
 echo "Done."

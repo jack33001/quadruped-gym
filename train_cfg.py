@@ -54,7 +54,7 @@ class RewardWeightsCfg:
     
     efficiency_weight: float = .001
     velocity_weight: float = 1.0
-    gait_tracking_weight: float = .05
+    gait_tracking_weight: float = .03
     stability_weight: float = 1.0
     
     joint_jerk: float = -0.0001
@@ -79,9 +79,9 @@ class VelocityCurriculumCfg:
     """Configuration for velocity command curriculum."""
     
     stages: list = field(default_factory=lambda: [
-        {"end_iteration": 150, "vel_range": (0.0, 0.0)},
-        {"end_iteration": 350, "vel_range": (0.0, 1.0)},
-        {"end_iteration": 600, "vel_range": (0.0, 2.0)},
+        {"end_iteration": 200, "vel_range": (0.0, 0.0)},
+        {"end_iteration": 400, "vel_range": (0.0, 1.0)},
+        {"end_iteration": 850, "vel_range": (0.0, 3.0)},
     ])
 
 
@@ -91,7 +91,7 @@ class TrainCfg:
 
     experiment_name: str = "quadruped_gait"
     run_name: str = ""
-    max_iterations: int = 400
+    max_iterations: int = 800
     save_interval: int = 50
     log_interval: int = 1
     seed: int = 42

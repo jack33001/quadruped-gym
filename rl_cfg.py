@@ -339,6 +339,6 @@ class QuadrupedEnvCfg(ManagerBasedRLEnvCfg):
         self.sim.dt = 0.02
         self.sim.render_interval = 1
         self.decimation = 1
-        self.episode_length_s = 10.0
+        self.episode_length_s = 20
         self.viewer.eye = (8.0, 8.0, 5.0)
         self.viewer.lookat = (0.0, 0.0, 0.0)

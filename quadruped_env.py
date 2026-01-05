@@ -32,8 +32,6 @@ class IsaacLabVecEnvWrapper(VecEnv):
         self.max_episode_length = int(env.max_episode_length)
         self.device = env.device
 
-        self.episode_length_buf = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
-        
         gait_cfg = GaitSchedulerCfg()
         self.gait_scheduler = GaitScheduler(self.num_envs, self.device, gait_cfg)
         self.sim_dt = env.step_dt
@@ -73,6 +71,19 @@ class IsaacLabVecEnvWrapper(VecEnv):
         
         # Do initial reset to populate observations
         self._do_initial_reset()
+
+    @property
+    def episode_length_buf(self) -> torch.Tensor:
+        """Return episode length buffer from underlying environment.
+        
+        RSL-RL uses this for init_at_random_ep_len to stagger episode resets.
+        """
+        return self._env.episode_length_buf
+
+    @episode_length_buf.setter
+    def episode_length_buf(self, value: torch.Tensor):
+        """Set episode length buffer in underlying environment."""
+        self._env.episode_length_buf[:] = value
 
     def _do_initial_reset(self):
         """Perform initial reset to populate observation buffers."""
@@ -221,8 +232,6 @@ class IsaacLabVecEnvWrapper(VecEnv):
         self.episode_rewards_sum.zero_()
         self.episode_steps.zero_()
         
-        self.episode_length_buf.zero_()
-        
         ang_vel, projected_gravity, joint_pos, joint_vel, joint_torques, foot_contacts = self._get_robot_state()
         self._init_prev_state(ang_vel, projected_gravity, joint_pos, joint_vel, joint_torques, foot_contacts)
         
@@ -256,11 +265,9 @@ class IsaacLabVecEnvWrapper(VecEnv):
         
         self.gait_scheduler.step(self.sim_dt)
         
-        self.episode_length_buf += 1
+        dones = terminated | truncated
         
-        time_out = self.episode_length_buf >= self.max_episode_length
-        
-        dones = terminated | truncated | time_out
+        time_outs = truncated & ~terminated
         
         self.episode_rewards_sum += rewards.squeeze() if rewards.dim() > 1 else rewards
         self.episode_steps += 1
@@ -277,8 +284,6 @@ class IsaacLabVecEnvWrapper(VecEnv):
                 self._completed_episodes.append((ep_reward, ep_length))
             
             self.gait_scheduler.reset(done_indices)
-            
-            self.episode_length_buf[done_indices] = 0
             
             self.episode_rewards_sum[dones] = 0.0
             self.episode_steps[dones] = 0.0
@@ -300,7 +305,7 @@ class IsaacLabVecEnvWrapper(VecEnv):
         
         self._last_obs = self._convert_obs(obs_dict)
         
-        extras["time_outs"] = time_out
+        extras["time_outs"] = time_outs
         extras["terrain_levels"] = self.terrain_levels.clone()
         
         if rewards.dim() > 1:
