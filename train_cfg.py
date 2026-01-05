@@ -70,8 +70,19 @@ class RewardWeightsCfg:
     body_rates: float = -0.05
     base_orientation: float = 0.2
     ride_height: float = 0.4
-    hip_position: float = -0.3
+    hip_position: float = -0.5
     leg_collision: float = -0.1
+
+
+@dataclass
+class VelocityCurriculumCfg:
+    """Configuration for velocity command curriculum."""
+    
+    stages: list = field(default_factory=lambda: [
+        {"end_iteration": 150, "vel_range": (0.0, 0.0)},
+        {"end_iteration": 350, "vel_range": (0.0, 1.0)},
+        {"end_iteration": 600, "vel_range": (0.0, 2.0)},
+    ])
 
 
 @dataclass
@@ -120,3 +131,4 @@ class TrainCfg:
     reward_weights: RewardWeightsCfg = field(default_factory=RewardWeightsCfg)
     sensor: SensorCfg = field(default_factory=SensorCfg)
     eval: EvalCfg = field(default_factory=EvalCfg)
+    velocity_curriculum: VelocityCurriculumCfg = field(default_factory=VelocityCurriculumCfg)

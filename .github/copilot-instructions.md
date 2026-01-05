@@ -7,3 +7,5 @@ Don't use any arguments in python files, if something needs to be specified then
 Don't use any emojis in the code, and if there are any, remove them.
 
 Don't add comments explaining changes you made - comments should serve to explain the code, not your thought process.
+
+Make sure to follow the existing interface structure - configurations and magic numbers go in configs, base functions go in base files, etc.

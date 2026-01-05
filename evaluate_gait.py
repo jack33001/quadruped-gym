@@ -28,7 +28,7 @@ from rl_cfg import QuadrupedEnvCfg
 from sim_cfg import FlatGroundSceneCfg
 from quadruped_env import IsaacLabVecEnvWrapper
 from evaluate_base import find_checkpoint, load_policy, set_camera_view, capture_frame, setup_frame_capture
-from gait_cfg import GaitType, GAIT_PARAMS
+from gait_cfg import GaitType, GAIT_PARAMS, GaitSchedulerCfg
 
 
 class GaitEvaluator:
@@ -50,6 +50,9 @@ class GaitEvaluator:
         self.camera_side_offset = 1.5
         
         self.viewport = None
+        
+        gait_cfg = GaitSchedulerCfg()
+        self.enabled_gaits = list(gait_cfg.enabled_gaits)
     
     def get_test_velocities(self) -> list:
         """Generate list of velocities to test."""
@@ -345,7 +348,7 @@ class GaitEvaluator:
         print(f"Checkpoint: {checkpoint_path}")
         print(f"Output directory: {self.output_dir}")
         print(f"Velocities: {self.get_test_velocities()}")
-        print(f"Gaits: {[GAIT_PARAMS[gt].name for gt in GaitType]}")
+        print(f"Gaits: {[GAIT_PARAMS[gt].name for gt in self.enabled_gaits]}")
         print(f"Test duration per combo: {self.test_duration}s")
         print("=" * 80 + "\n")
         
@@ -367,7 +370,7 @@ class GaitEvaluator:
         results = {}
         video_paths = []
         
-        for gait_type in GaitType:
+        for gait_type in self.enabled_gaits:
             gait_name = GAIT_PARAMS[gait_type].name
             print(f"\nTesting gait: {gait_name}")
             results[gait_name] = {}

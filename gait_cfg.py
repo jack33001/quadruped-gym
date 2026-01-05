@@ -93,6 +93,8 @@ class GaitSchedulerCfg:
     default_gait: GaitType = GaitType.AMBLE
     randomize_gait: bool = True
     
+    enabled_gaits: tuple = (GaitType.AMBLE, GaitType.TROT, GaitType.BOUND, GaitType.HOP)
+    
     base_velocity: float = 1.0
     min_cycle_scale: float = 0.75
     max_cycle_scale: float = 1.25
@@ -122,6 +124,9 @@ class GaitScheduler:
         self.num_envs = num_envs
         self.device = device
         self.cfg = cfg if cfg is not None else GaitSchedulerCfg()
+        
+        self.enabled_gaits = torch.tensor(self.cfg.enabled_gaits, device=device, dtype=torch.long)
+        self.num_enabled_gaits = len(self.enabled_gaits)
         
         self.leg_phases = torch.zeros(num_envs, self.cfg.num_legs, device=device)
         self.gait_types = torch.zeros(num_envs, dtype=torch.long, device=device)
@@ -218,10 +223,10 @@ class GaitScheduler:
         should_randomize = randomize_gait if randomize_gait is not None else self.cfg.randomize_gait
         
         if should_randomize:
-            num_gaits = len(GaitType)
-            self.gait_types[env_ids] = torch.randint(
-                0, num_gaits, (len(env_ids),), device=self.device
+            random_indices = torch.randint(
+                0, self.num_enabled_gaits, (len(env_ids),), device=self.device
             )
+            self.gait_types[env_ids] = self.enabled_gaits[random_indices]
         else:
             self.gait_types[env_ids] = self.cfg.default_gait
     
@@ -248,8 +253,10 @@ class GaitScheduler:
             if switch_indices.dim() == 0:
                 switch_indices = switch_indices.unsqueeze(0)
             
-            num_gaits = len(GaitType)
-            new_gaits = torch.randint(0, num_gaits, (len(switch_indices),), device=self.device)
+            random_indices = torch.randint(
+                0, self.num_enabled_gaits, (len(switch_indices),), device=self.device
+            )
+            new_gaits = self.enabled_gaits[random_indices]
             self.gait_types[switch_indices] = new_gaits
             
             self.time_since_gait_switch[switch_indices] = 0.0
@@ -353,6 +360,26 @@ class GaitScheduler:
             Tensor of shape (num_envs, num_legs, 2) with desired x, y positions.
         """
         return self.get_foot_positions()[:, :, :2]
+    
+    def get_leg_phases(self) -> torch.Tensor:
+        """Get the phase [0, 1) for each leg, including phase offsets.
+        
+        Returns:
+            Tensor of shape (num_envs, num_legs) with phase values in [0, 1).
+        """
+        offsets = self.phase_offsets[self.gait_types]
+        effective_phase = (self.leg_phases + offsets) % 1.0
+        return effective_phase
+    
+    def get_normalized_phase(self) -> torch.Tensor:
+        """Get the normalized gait phase [0, 1) for each environment.
+        
+        Uses the first leg's phase as the reference phase for the gait cycle.
+        
+        Returns:
+            Tensor of shape (num_envs,) with phase values in [0, 1).
+        """
+        return self.leg_phases[:, 0]
     
     def get_gait_obs(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Get gait scheduler outputs for observation.

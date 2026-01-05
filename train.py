@@ -22,7 +22,7 @@ from isaaclab.envs import ManagerBasedRLEnv
 from rsl_rl.runners import OnPolicyRunner
 
 from rl_cfg import QuadrupedEnvCfg
-from train_cfg import TrainCfg, RewardWeightsCfg
+from train_cfg import TrainCfg, RewardWeightsCfg, VelocityCurriculumCfg
 from quadruped_env import IsaacLabVecEnvWrapper
 
 
@@ -74,6 +74,9 @@ class GaitRewardWrapper(IsaacLabVecEnvWrapper):
         self._prev_isaac_episode_sums = None
         self._velocity_error_sum = None
         self._velocity_error_count = None
+        self._velocity_curriculum = None
+        self._step_count = 0
+        self._current_iteration = 0
         
         super().__init__(env, sensor_cfg=sensor_cfg)
         
@@ -86,6 +89,17 @@ class GaitRewardWrapper(IsaacLabVecEnvWrapper):
         
         self._velocity_error_sum = torch.zeros(self.num_envs, device=self.device)
         self._velocity_error_count = torch.zeros(self.num_envs, device=self.device)
+    
+    def set_velocity_curriculum(self, curriculum):
+        """Set the velocity curriculum manager."""
+        self._velocity_curriculum = curriculum
+    
+    def set_iteration(self, iteration: int):
+        """Update current iteration for curriculum."""
+        if self._current_iteration != iteration:
+            self._current_iteration = iteration
+            if self._velocity_curriculum is not None:
+                self._velocity_curriculum.update(iteration)
     
     def reset(self):
         """Reset and clear episode sums."""
@@ -301,6 +315,66 @@ class GaitRewardWrapper(IsaacLabVecEnvWrapper):
         
         return points_body
 
+class VelocityCurriculum:
+    """Manages velocity command curriculum during training."""
+    
+    def __init__(self, cfg: VelocityCurriculumCfg, isaac_env):
+        self.cfg = cfg
+        self.isaac_env = isaac_env
+        self.current_stage = 0
+        self._last_vel_range = None
+        self._iteration = 0
+    
+    def get_vel_range_for_iteration(self, iteration: int) -> tuple:
+        """Get the velocity range for the current iteration."""
+        for stage in self.cfg.stages:
+            if iteration < stage["end_iteration"]:
+                return stage["vel_range"]
+        return self.cfg.stages[-1]["vel_range"]
+    
+    def update(self, iteration: int):
+        """Update velocity command range based on current iteration."""
+        self._iteration = iteration
+        vel_range = self.get_vel_range_for_iteration(iteration)
+        
+        if vel_range != self._last_vel_range:
+            self._apply_vel_range(vel_range)
+            self._last_vel_range = vel_range
+            print(f"[Curriculum] Iteration {iteration}: velocity range set to {vel_range}")
+    
+    def _apply_vel_range(self, vel_range: tuple):
+        """Apply velocity range to environment command manager."""
+        cmd_manager = self.isaac_env.command_manager
+        
+        if hasattr(cmd_manager, '_terms') and 'base_velocity' in cmd_manager._terms:
+            term = cmd_manager._terms['base_velocity']
+            if hasattr(term, 'cfg') and hasattr(term.cfg, 'ranges'):
+                term.cfg.ranges.lin_vel_x = vel_range
+
+
+class CurriculumGaitRewardWrapper(GaitRewardWrapper):
+    """Wrapper that adds curriculum support via step counting."""
+    
+    def __init__(self, env, reward_weights: RewardWeightsCfg, sensor_cfg=None, 
+                 curriculum: VelocityCurriculum = None, steps_per_iteration: int = 24):
+        super().__init__(env, reward_weights, sensor_cfg)
+        self._curriculum = curriculum
+        self._steps_per_iteration = steps_per_iteration * self.num_envs
+        self._total_steps = 0
+        self._last_iteration = -1
+    
+    def step(self, actions):
+        self._total_steps += self.num_envs
+        
+        current_iteration = self._total_steps // self._steps_per_iteration
+        if current_iteration != self._last_iteration:
+            self._last_iteration = current_iteration
+            if self._curriculum is not None:
+                self._curriculum.update(current_iteration)
+        
+        return super().step(actions)
+
+
 def get_rsl_rl_cfg(train_cfg: TrainCfg, num_envs: int):
     """Convert TrainCfg to RSL-RL config dictionary."""
     return {
@@ -336,9 +410,18 @@ def main():
 
     isaac_env = ManagerBasedRLEnv(cfg=env_cfg)
     
-    env = GaitRewardWrapper(isaac_env, train_cfg.reward_weights, sensor_cfg=train_cfg.sensor)
+    velocity_curriculum = VelocityCurriculum(train_cfg.velocity_curriculum, isaac_env)
+    
+    env = CurriculumGaitRewardWrapper(
+        isaac_env, 
+        train_cfg.reward_weights, 
+        sensor_cfg=train_cfg.sensor,
+        curriculum=velocity_curriculum,
+        steps_per_iteration=train_cfg.num_steps_per_env
+    )
 
     apply_reward_weights(env, train_cfg.reward_weights)
+    velocity_curriculum.update(0)
 
     log_dir = f"logs/{train_cfg.experiment_name}"
     if os.path.exists(log_dir):
@@ -371,6 +454,10 @@ def main():
     print(f"  Velocity: {rw.velocity_weight}")
     print(f"  Gait Tracking: {rw.gait_tracking_weight}")
     print(f"  Stability: {rw.stability_weight}")
+    print("=" * 80)
+    print("\nVelocity Curriculum:")
+    for stage in train_cfg.velocity_curriculum.stages:
+        print(f"  Until iteration {stage['end_iteration']}: {stage['vel_range']}")
     print("=" * 80)
     print("\nTensorBoard: tensorboard --logdir logs")
     print("View at: http://localhost:6006\n")
