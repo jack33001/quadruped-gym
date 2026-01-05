@@ -17,6 +17,8 @@ EVAL_CFG = TRAIN_CFG.eval
 app_launcher = AppLauncher(headless=EVAL_CFG.headless)
 simulation_app = app_launcher.app
 
+import shutil
+
 import torch
 
 from rl_cfg import QuadrupedEnvCfg
@@ -159,7 +161,9 @@ class RoughTerrainEvaluator(BaseEvaluator):
         self.spotlight_path = None
         self.num_rows = 6
         self.num_cols = 3
-        self.plots_dir = f"{self.log_dir}/plots_rough"
+        self.plots_dir = f"{self.log_dir}/eval_rough"
+        self.video_dir = f"{self.log_dir}/eval_rough/videos"
+        self.frames_dir = f"{self.log_dir}/eval_rough/frames"
 
     def create_env_cfg(self) -> QuadrupedEnvCfg:
         env_cfg = QuadrupedEnvCfg()

@@ -1,0 +1,10 @@
+Metric                      | amble  | trot   | bound  | hop   
+---------------------------------------------------------------
+Avg Energy (J)              | 817.98 | 792.08 | 794.80 | 868.81
+Avg Velocity Error (%)      | 3.8    | 3.8    | 55.9   | 16.9  
+Avg Gait Timing Error (0-1) | 0.274  | 0.212  | 0.229  | 0.232 
+Avg Heading Drift (deg)     | 5.12   | 5.39   | 52.40  | 26.28 
+Joint Torque Std (Nm)       | 5.149  | 5.100  | 5.122  | 5.246 
+Avg Pitch Rate (rad/s)      | 0.294  | 0.250  | 0.945  | 0.317 
+Avg Roll Rate (rad/s)       | 0.146  | 0.131  | 0.589  | 0.165 
+Early Terminations          | 0      | 0      | 0      | 0     

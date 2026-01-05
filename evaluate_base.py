@@ -116,7 +116,7 @@ def find_checkpoint(log_dir: str, checkpoint_name: str) -> str:
     """Find checkpoint file, falling back to latest if specified not found.
     
     Args:
-        log_dir: Directory containing checkpoints.
+        log_dir: Directory containing checkpoints (models subfolder).
         checkpoint_name: Desired checkpoint filename.
         
     Returns:
@@ -125,18 +125,23 @@ def find_checkpoint(log_dir: str, checkpoint_name: str) -> str:
     Raises:
         ValueError: If no checkpoints are found.
     """
-    checkpoint_path = os.path.join(log_dir, checkpoint_name)
+    models_dir = os.path.join(log_dir, "models")
+    
+    if not os.path.exists(models_dir):
+        models_dir = log_dir
+    
+    checkpoint_path = os.path.join(models_dir, checkpoint_name)
     if os.path.exists(checkpoint_path):
         return checkpoint_path
 
-    checkpoints = [f for f in os.listdir(log_dir) if f.startswith("model_") and f.endswith(".pt")]
+    checkpoints = [f for f in os.listdir(models_dir) if f.startswith("model_") and f.endswith(".pt")]
     if checkpoints:
         checkpoints.sort(key=lambda x: int(x.replace("model_", "").replace(".pt", "")))
-        checkpoint_path = os.path.join(log_dir, checkpoints[-1])
+        checkpoint_path = os.path.join(models_dir, checkpoints[-1])
         print(f"Specified checkpoint not found, using latest: {checkpoints[-1]}")
         return checkpoint_path
 
-    raise ValueError(f"No checkpoints found in {log_dir}. Run training first.")
+    raise ValueError(f"No checkpoints found in {models_dir}. Run training first.")
 
 
 def load_policy(log_dir: str, checkpoint_path: str, obs_dict, num_actions: int, device) -> ActorCritic:
@@ -362,6 +367,16 @@ class BaseEvaluator(ABC):
         env_cfg.commands.base_velocity.ranges.lin_vel_y = (0.0, 0.0)
         env_cfg.commands.base_velocity.ranges.ang_vel_z = (0.0, 0.0)
 
+    def _setup_output_dirs(self):
+        """Setup output directories, clearing previous results."""
+        if self.record_video or not self.headless:
+            if os.path.exists(self.video_dir):
+                shutil.rmtree(self.video_dir)
+            if os.path.exists(self.frames_dir):
+                shutil.rmtree(self.frames_dir)
+            os.makedirs(self.video_dir, exist_ok=True)
+            os.makedirs(self.frames_dir, exist_ok=True)
+
     def run(self, simulation_app):
         """Run the evaluation loop.
         
@@ -384,8 +399,7 @@ class BaseEvaluator(ABC):
 
         viewport = None
         if self.record_video or not self.headless:
-            os.makedirs(self.video_dir, exist_ok=True)
-            os.makedirs(self.frames_dir, exist_ok=True)
+            self._setup_output_dirs()
             viewport = setup_frame_capture()
             if viewport is not None:
                 print(f"Frame capture enabled, saving to {self.frames_dir}")

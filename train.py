@@ -424,9 +424,12 @@ def main():
     velocity_curriculum.update(0)
 
     log_dir = f"logs/{train_cfg.experiment_name}"
+    models_dir = f"{log_dir}/models"
+    
     if os.path.exists(log_dir):
         shutil.rmtree(log_dir)
     os.makedirs(log_dir, exist_ok=True)
+    os.makedirs(models_dir, exist_ok=True)
 
     pickle.dump({
         "env_cfg": env_cfg,
@@ -465,7 +468,7 @@ def main():
     runner = OnPolicyRunner(
         env=env,
         train_cfg=train_cfg_dict,
-        log_dir=log_dir,
+        log_dir=models_dir,
         device=env.device,
     )
 
