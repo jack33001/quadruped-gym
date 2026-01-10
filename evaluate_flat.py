@@ -11,7 +11,7 @@ os.environ["PYTORCH_NVFUSER_DISABLE_FALLBACK"] = "1"
 os.environ["TORCH_ALLOW_TF32_CUBLAS_OVERRIDE"] = "1"
 
 import matplotlib
-matplotlib.use('Agg')
+matplotlib.use('TkAgg')
 
 from isaaclab.app import AppLauncher
 
@@ -57,6 +57,9 @@ class GaitStatistics:
     time_series_heading: list = field(default_factory=list)
     time_series_height: list = field(default_factory=list)
     time_series_time: list = field(default_factory=list)
+    # New fields for per-env data
+    time_series_velocity_envs: list = field(default_factory=list)
+    time_series_commanded_envs: list = field(default_factory=list)
     
     transient_samples: int = 0
     
@@ -145,7 +148,17 @@ class FlatGroundEvaluator:
         
         isaac_env = ManagerBasedRLEnv(cfg=env_cfg)
         env = IsaacLabVecEnvWrapper(isaac_env)
-        
+
+        # Assign a different random velocity command to each environment
+        cmd_manager = isaac_env.command_manager
+        if hasattr(cmd_manager, 'get_command'):
+            velocity_cmd = cmd_manager.get_command("base_velocity")
+            if velocity_cmd is not None:
+                num_envs = env_cfg.scene.num_envs
+                low, high = env_cfg.commands.base_velocity.ranges.lin_vel_x
+                velocity_cmd[:, 0] = torch.FloatTensor(num_envs).uniform_(low, high)
+                # lin_vel_y and ang_vel_z are already set to 0
+
         return env, isaac_env, env_cfg
     
     def set_gait_for_all_envs(self, env, gait_type: GaitType):
@@ -253,6 +266,9 @@ class FlatGroundEvaluator:
                 stats.time_series_pitch_rate.append(pitch_rate.mean().item())
                 stats.time_series_heading.append(current_heading_deg.mean().item())
                 stats.time_series_height.append(root_pos[:, 2].mean().item())
+                # Store per-env arrays for scatter plot
+                stats.time_series_velocity_envs.append(actual_vel.cpu().numpy().copy())
+                stats.time_series_commanded_envs.append(commanded_vel.cpu().numpy().copy())
             
             if dones.any():
                 done_indices = dones.nonzero(as_tuple=False).squeeze(-1)
@@ -317,10 +333,10 @@ class FlatGroundEvaluator:
             
             time = np.array(stats.time_series_time)
             
-            fig = plt.figure(figsize=(16, 20))
-            fig.suptitle(f"Gait: {gait_name.upper()}", fontsize=16, fontweight='bold')
+            fig = plt.figure(figsize=(16, 18))
+            fig.suptitle(f"Gait: {gait_name.upper()}", fontsize=16, fontweight='bold', y=0.995)
             
-            ax1 = fig.add_subplot(6, 1, 1)
+            ax1 = fig.add_subplot(5, 1, 1)
             ax1.plot(time, stats.time_series_velocity, 'b-', linewidth=1.5, label='Actual')
             ax1.plot(time, stats.time_series_commanded, 'r--', linewidth=1.5, label='Commanded')
             ax1.set_ylabel('Velocity (m/s)')
@@ -328,7 +344,7 @@ class FlatGroundEvaluator:
             ax1.legend(loc='upper right')
             ax1.grid(True, alpha=0.3)
             
-            ax2 = fig.add_subplot(6, 1, 2)
+            ax2 = fig.add_subplot(5, 1, 2)
             ax2.plot(time, stats.time_series_roll_rate, 'r-', linewidth=1.5, label='Roll')
             ax2.plot(time, stats.time_series_pitch_rate, 'g-', linewidth=1.5, label='Pitch')
             ax2.set_ylabel('Angular Rate (rad/s)')
@@ -336,13 +352,13 @@ class FlatGroundEvaluator:
             ax2.legend(loc='upper right')
             ax2.grid(True, alpha=0.3)
             
-            ax3 = fig.add_subplot(6, 1, 3)
+            ax3 = fig.add_subplot(5, 1, 3)
             ax3.plot(time, stats.time_series_heading, 'b-', linewidth=1.5)
             ax3.set_ylabel('Heading (deg)')
             ax3.set_title(f'Heading | Avg Drift: {stats.avg_heading_drift():.2f} deg')
             ax3.grid(True, alpha=0.3)
             
-            ax4 = fig.add_subplot(6, 1, 4)
+            ax4 = fig.add_subplot(5, 1, 4)
             ax4.plot(time, stats.time_series_height, 'b-', linewidth=1.5)
             ax4.axhline(y=0.22, color='r', linestyle='--', linewidth=1.0, label='Target')
             ax4.set_ylabel('Height (m)')
@@ -350,164 +366,60 @@ class FlatGroundEvaluator:
             ax4.legend(loc='upper right')
             ax4.grid(True, alpha=0.3)
             
-            ax5 = fig.add_subplot(6, 1, 5)
+            ax5 = fig.add_subplot(5, 1, 5)
             ax5.plot(time, stats.time_series_power, 'b-', linewidth=1.5)
             ax5.set_ylabel('Power (W)')
+            ax5.set_xlabel('Time (s)')
             ax5.set_title(f'Power | Total Energy: {stats.avg_energy():.2f} J')
             ax5.grid(True, alpha=0.3)
             
-            ax6 = fig.add_subplot(6, 1, 6)
-            metrics = ['Vel Error', 'Gait Error', 'Heading Drift', 'Torque Std']
-            values = [
-                stats.avg_velocity_error() / 100,
-                stats.avg_gait_timing_error(),
-                stats.avg_heading_drift() / 90,
-                stats.std_joint_torque() / 10,
-            ]
-            bar_colors = ['#3498db', '#2ecc71', '#e74c3c', '#9b59b6']
-            ax6.bar(metrics, values, color=bar_colors)
-            ax6.set_ylabel('Normalized Value')
-            ax6.set_title('Performance Summary (Normalized)')
-            ax6.grid(True, alpha=0.3, axis='y')
-            
-            plt.tight_layout()
+            plt.tight_layout(rect=[0, 0, 1, 0.98])
             
             output_path = os.path.join(self.plots_dir, f"gait_{gait_name}.png")
-            try:
-                fig.savefig(output_path, dpi=150, bbox_inches='tight')
-                print(f"    Saved plot: {output_path}")
-            except Exception as e:
-                print(f"    Error saving plot: {e}")
+            plt.savefig(output_path, dpi=150, bbox_inches='tight')
+            plt.show()
             plt.close(fig)
-    
+            print(f"    Saved plot: {output_path}")
+
     def generate_comparison_plots(self):
-        """Generate comparison plots across all gaits."""
         gait_names = [GAIT_PARAMS[gt].name for gt in self.enabled_gaits]
         colors = plt.cm.tab10(np.linspace(0, 1, len(gait_names)))
-        
-        fig, axes = plt.subplots(3, 2, figsize=(14, 12))
-        fig.suptitle('Gait Comparison', fontsize=14, fontweight='bold')
-        
-        ax = axes[0, 0]
+
+        plt.figure(figsize=(10, 7))
+        num_envs = self.num_envs_per_gait
+        steady_steps = 100  # matches your actual number of recorded steps
+
         for i, gait_name in enumerate(gait_names):
             stats = self.gait_stats[gait_name]
-            if stats.time_series_time:
-                ax.plot(stats.time_series_time, stats.time_series_velocity, 
-                       color=colors[i], linewidth=1.5, label=gait_name)
-        ax.set_xlabel('Time (s)')
-        ax.set_ylabel('Velocity (m/s)')
-        ax.set_title('Forward Velocity')
-        ax.legend(loc='upper right')
-        ax.grid(True, alpha=0.3)
-        
-        ax = axes[0, 1]
-        for i, gait_name in enumerate(gait_names):
-            stats = self.gait_stats[gait_name]
-            if stats.time_series_time:
-                ax.plot(stats.time_series_time, stats.time_series_power, 
-                       color=colors[i], linewidth=1.5, label=gait_name)
-        ax.set_xlabel('Time (s)')
-        ax.set_ylabel('Power (W)')
-        ax.set_title('Power Consumption')
-        ax.legend(loc='upper right')
-        ax.grid(True, alpha=0.3)
-        
-        ax = axes[1, 0]
-        for i, gait_name in enumerate(gait_names):
-            stats = self.gait_stats[gait_name]
-            if stats.time_series_time:
-                ax.plot(stats.time_series_time, stats.time_series_roll_rate, 
-                       color=colors[i], linewidth=1.5, label=gait_name)
-        ax.set_xlabel('Time (s)')
-        ax.set_ylabel('Roll Rate (rad/s)')
-        ax.set_title('Roll Rate')
-        ax.legend(loc='upper right')
-        ax.grid(True, alpha=0.3)
-        
-        ax = axes[1, 1]
-        for i, gait_name in enumerate(gait_names):
-            stats = self.gait_stats[gait_name]
-            if stats.time_series_time:
-                ax.plot(stats.time_series_time, stats.time_series_pitch_rate, 
-                       color=colors[i], linewidth=1.5, label=gait_name)
-        ax.set_xlabel('Time (s)')
-        ax.set_ylabel('Pitch Rate (rad/s)')
-        ax.set_title('Pitch Rate')
-        ax.legend(loc='upper right')
-        ax.grid(True, alpha=0.3)
-        
-        ax = axes[2, 0]
-        for i, gait_name in enumerate(gait_names):
-            stats = self.gait_stats[gait_name]
-            if stats.time_series_time:
-                ax.plot(stats.time_series_time, stats.time_series_heading, 
-                       color=colors[i], linewidth=1.5, label=gait_name)
-        ax.set_xlabel('Time (s)')
-        ax.set_ylabel('Heading (deg)')
-        ax.set_title('Heading')
-        ax.legend(loc='upper right')
-        ax.grid(True, alpha=0.3)
-        
-        ax = axes[2, 1]
-        for i, gait_name in enumerate(gait_names):
-            stats = self.gait_stats[gait_name]
-            if stats.time_series_time:
-                ax.plot(stats.time_series_time, stats.time_series_height, 
-                       color=colors[i], linewidth=1.5, label=gait_name)
-        ax.axhline(y=0.22, color='k', linestyle='--', linewidth=1.0, label='Target')
-        ax.set_xlabel('Time (s)')
-        ax.set_ylabel('Height (m)')
-        ax.set_title('Ride Height')
-        ax.legend(loc='upper right')
-        ax.grid(True, alpha=0.3)
-        
-        plt.tight_layout()
-        
-        output_path = os.path.join(self.plots_dir, "gait_comparison_timeseries.png")
-        fig.savefig(output_path, dpi=150, bbox_inches='tight')
-        plt.close(fig)
-        
+            if len(stats.time_series_commanded_envs) == 0 or len(stats.time_series_velocity_envs) == 0:
+                print(f"{gait_name}: No data to plot.")
+                continue
+            commanded = np.stack(stats.time_series_commanded_envs)  # (num_recordings, num_envs)
+            actual = np.stack(stats.time_series_velocity_envs)
+            total_steps = commanded.shape[0]
+            if total_steps < steady_steps:
+                print(f"{gait_name}: Not enough steps to plot. total_steps={total_steps}")
+                continue
+            commanded_steady = commanded[-steady_steps:]
+            actual_steady = actual[-steady_steps:]
+            vel_error = np.abs(actual_steady - commanded_steady)
+            mean_error_per_env = np.mean(vel_error, axis=0)
+            mean_commanded_per_env = np.mean(commanded_steady, axis=0)
+            print(f"{gait_name}: mean_commanded_per_env shape: {mean_commanded_per_env.shape}, mean_error_per_env shape: {mean_error_per_env.shape}")
+            print(f"{gait_name}: mean_commanded_per_env sample: {mean_commanded_per_env[:5]}")
+            print(f"{gait_name}: mean_error_per_env sample: {mean_error_per_env[:5]}")
+            plt.scatter(mean_commanded_per_env, mean_error_per_env, color=colors[i], s=12, alpha=0.7, label=gait_name)
+        plt.xlabel('Mean Commanded Velocity (m/s)')
+        plt.ylabel('Mean Steady-State Velocity Error (m/s)')
+        plt.title('Steady-State Velocity Error vs Commanded Velocity (per env)')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        output_path = os.path.join(self.plots_dir, "gait_comparison.png")
+        plt.savefig(output_path, dpi=150, bbox_inches='tight')
+        plt.show()
+        plt.close()
         print(f"  Saved comparison plot: {output_path}")
-        
-        fig, ax = plt.subplots(figsize=(12, 6))
-        
-        metrics = ['Energy\n(J)', 'Vel Error\n(%)', 'Gait Error\n(x100)', 
-                   'Heading Drift\n(deg)', 'Torque Std\n(Nm)', 
-                   'Pitch Rate\n(rad/s)', 'Roll Rate\n(rad/s)']
-        
-        x = np.arange(len(metrics))
-        width = 0.8 / len(gait_names)
-        
-        for i, gait_name in enumerate(gait_names):
-            stats = self.gait_stats[gait_name]
-            values = [
-                stats.avg_energy(),
-                stats.avg_velocity_error(),
-                stats.avg_gait_timing_error() * 100,
-                stats.avg_heading_drift(),
-                stats.std_joint_torque(),
-                stats.avg_pitch_rate(),
-                stats.avg_roll_rate(),
-            ]
-            offset = (i - len(gait_names) / 2 + 0.5) * width
-            ax.bar(x + offset, values, width, label=gait_name, color=colors[i])
-        
-        ax.set_xlabel('Metric')
-        ax.set_ylabel('Value')
-        ax.set_title('Performance Metrics by Gait')
-        ax.set_xticks(x)
-        ax.set_xticklabels(metrics)
-        ax.legend(loc='upper right')
-        ax.grid(True, alpha=0.3, axis='y')
-        
-        plt.tight_layout()
-        
-        output_path = os.path.join(self.plots_dir, "gait_comparison_bar.png")
-        fig.savefig(output_path, dpi=150, bbox_inches='tight')
-        plt.close(fig)
-        
-        print(f"  Saved bar chart: {output_path}")
-    
+
     def run(self):
         """Run the full evaluation."""
         self.setup_dirs()
