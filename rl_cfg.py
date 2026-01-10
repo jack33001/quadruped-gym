@@ -81,22 +81,12 @@ class ObservationsCfg:
             scale=SENSOR_CFG.joint_velocity_scale
         )
 
-        # Last actions
-        last_action = ObservationTermCfg(func=mdp.last_action)
+        # Remove last_action from policy observations
 
         # Base height
         base_height = ObservationTermCfg(
             func=base_pos_z,
             params={"asset_cfg": SceneEntityCfg("robot")},
-        )
-
-        # Foot contact states
-        foot_contact = ObservationTermCfg(
-            func=foot_contact,
-            params={
-                "sensor_cfg": SceneEntityCfg("foot_contact"),
-                "threshold": SENSOR_CFG.foot_contact_threshold,
-            },
         )
 
         # Joint torques
@@ -105,6 +95,8 @@ class ObservationsCfg:
             params={"asset_cfg": SceneEntityCfg("robot")},
         )
 
+        # Remove previous state features here (they are now encoded in the wrapper)
+        # Remove prev_action term (handled in wrapper)
         def __post_init__(self):
             self.enable_corruption = False
             self.concatenate_terms = True
@@ -324,7 +316,7 @@ class TerminationsCfg:
 class QuadrupedEnvCfg(ManagerBasedRLEnvCfg):
     """Configuration for quadruped locomotion environment."""
 
-    scene: FlatGroundSceneCfg = FlatGroundSceneCfg(num_envs=8192, env_spacing=2.5)
+    scene: FlatGroundSceneCfg = FlatGroundSceneCfg(num_envs=16384, env_spacing=2.5)
     observations: ObservationsCfg = ObservationsCfg()
     actions: ActionsCfg = ActionsCfg()
     commands: CommandsCfg = CommandsCfg()

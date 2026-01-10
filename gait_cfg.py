@@ -93,7 +93,7 @@ class GaitSchedulerCfg:
     default_gait: GaitType = GaitType.AMBLE
     randomize_gait: bool = True
     
-    enabled_gaits: tuple = (GaitType.AMBLE, GaitType.TROT, GaitType.BOUND, GaitType.HOP)
+    enabled_gaits: tuple = (GaitType.AMBLE, GaitType.TROT, GaitType.BOUND)
     
     base_velocity: float = 1.0
     min_cycle_scale: float = 0.75

@@ -79,9 +79,9 @@ class VelocityCurriculumCfg:
     """Configuration for velocity command curriculum."""
     
     stages: list = field(default_factory=lambda: [
-        {"end_iteration": 200, "vel_range": (0.0, 0.0)},
-        {"end_iteration": 400, "vel_range": (0.0, 1.0)},
-        {"end_iteration": 850, "vel_range": (0.0, 3.0)},
+        {"end_iteration": 1, "vel_range": (0.0, 0.0)},
+        {"end_iteration": 2, "vel_range": (0.0, 1.0)},
+        {"end_iteration": 3, "vel_range": (0.0, 3.0)},
     ])
 
 
@@ -123,8 +123,8 @@ class TrainCfg:
     policy: dict = field(default_factory=lambda: {
         "class_name": "ActorCritic",
         "activation": "lrelu",
-        "actor_hidden_dims": [512, 256, 128],
-        "critic_hidden_dims": [512, 256, 128],
+        "actor_hidden_dims":  [256, 128, 64],
+        "critic_hidden_dims": [256, 128, 64],
         "init_noise_std": 0.5,
     })
 

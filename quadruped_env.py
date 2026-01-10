@@ -3,6 +3,7 @@ RSL-RL compatible wrapper for Isaac Lab quadruped environment.
 """
 import math
 import torch
+import torch.nn as nn
 from tensordict import TensorDict
 
 from isaaclab.envs import ManagerBasedRLEnv
@@ -11,6 +12,25 @@ from rsl_rl.env import VecEnv
 from gait_cfg import GaitScheduler, GaitSchedulerCfg
 from sim_cfg import compute_projected_gravity
 
+
+class HistoryEncoder(nn.Module):
+    def __init__(self, state_dim, action_dim, history_len, encoded_dim):
+        super().__init__()
+        self.state_dim = state_dim
+        self.action_dim = action_dim
+        self.history_len = history_len
+        self.encoded_dim = encoded_dim
+        self.encoder = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear((state_dim + action_dim) * history_len, 128),
+            nn.ReLU(),
+            nn.Linear(128, encoded_dim),
+            nn.ReLU(),
+        )
+
+    def forward(self, state_history, action_history):
+        x = torch.cat([state_history, action_history], dim=-1)
+        return self.encoder(x)
 
 class IsaacLabVecEnvWrapper(VecEnv):
     """Wrapper to make Isaac Lab ManagerBasedRLEnv compatible with RSL-RL."""
@@ -45,15 +65,15 @@ class IsaacLabVecEnvWrapper(VecEnv):
         
         self._last_obs = None
         
-        # Base: commands(3) + projected_gravity(3) + ang_vel(3) + joint_pos(8) + joint_vel(8) + last_action(8) = 33
-        # New base observations: base_height(1) + foot_contact(4) + joint_torques(8) = 13
-        # Prev state: prev_ang_vel(3) + prev_projected_gravity(3) + prev_joint_pos(8) + prev_joint_vel(8) = 22
-        # New prev state: prev_joint_torques(8) + prev_foot_contacts(4) = 12
-        # Gait: contact_states(4) + foot_xy_positions(8) + foot_heights(4) = 16
-        # Per-leg phase: sin(phase)*4 + cos(phase)*4 = 8
-        # Total additional: 22 + 12 + 16 + 8 = 58
         base_obs_dim = env.observation_manager.group_obs_dim["policy"][0]
-        self.num_obs = base_obs_dim + 22 + 12 + 16 + 8
+        self.encoded_dim = 32
+        self.history_len = 5
+        self.state_dim = 3 + 3 + 8 + 8 + 8 + 4
+        self.action_dim = self.num_actions
+        self.history_encoder = HistoryEncoder(self.state_dim, self.action_dim, self.history_len, self.encoded_dim).to(env.device)
+        self._state_history = torch.zeros(self.num_envs, self.history_len, self.state_dim, device=self.device)
+        self._action_history = torch.zeros(self.num_envs, self.history_len, self.action_dim, device=self.device)
+        self.num_obs = base_obs_dim - (22 + 12) + self.encoded_dim + 8
         
         # Debug counters
         self._nan_obs_count = 0
@@ -94,7 +114,9 @@ class IsaacLabVecEnvWrapper(VecEnv):
         self.gait_scheduler.reset()
         
         ang_vel, projected_gravity, joint_pos, joint_vel, joint_torques, foot_contacts = self._get_robot_state()
-        self._init_prev_state(ang_vel, projected_gravity, joint_pos, joint_vel, joint_torques, foot_contacts)
+        state_vec = torch.cat([ang_vel, projected_gravity, joint_pos, joint_vel, joint_torques, foot_contacts], dim=-1)
+        self._state_history = state_vec.unsqueeze(1).repeat(1, self.history_len, 1)
+        self._action_history.zero_()
         
         self._last_obs = self._convert_obs(obs_dict)
 
@@ -165,6 +187,14 @@ class IsaacLabVecEnvWrapper(VecEnv):
         
         return ang_vel, projected_gravity, joint_pos, joint_vel, joint_torques, foot_contacts
 
+    def _update_state_history(self, state_vec, reset_ids=None):
+        if reset_ids is not None and len(reset_ids) > 0:
+            self._state_history[reset_ids, :, :] = 0.0
+            self._state_history[reset_ids, -1, :] = state_vec[reset_ids]
+        else:
+            self._state_history = torch.roll(self._state_history, shifts=-1, dims=1)
+            self._state_history[:, -1, :] = state_vec
+
     def _init_prev_state(self, ang_vel, projected_gravity, joint_pos, joint_vel, joint_torques, foot_contacts):
         """Initialize previous state buffers with current state."""
         self._prev_imu_ang_vel = ang_vel.clone()
@@ -233,7 +263,9 @@ class IsaacLabVecEnvWrapper(VecEnv):
         self.episode_steps.zero_()
         
         ang_vel, projected_gravity, joint_pos, joint_vel, joint_torques, foot_contacts = self._get_robot_state()
-        self._init_prev_state(ang_vel, projected_gravity, joint_pos, joint_vel, joint_torques, foot_contacts)
+        state_vec = torch.cat([ang_vel, projected_gravity, joint_pos, joint_vel, joint_torques, foot_contacts], dim=-1)
+        self._state_history = state_vec.unsqueeze(1).repeat(1, self.history_len, 1)
+        self._action_history.zero_()
         
         self._last_obs = self._convert_obs(obs_dict)
         return self._last_obs
@@ -272,6 +304,7 @@ class IsaacLabVecEnvWrapper(VecEnv):
         self.episode_rewards_sum += rewards.squeeze() if rewards.dim() > 1 else rewards
         self.episode_steps += 1
         
+        state_vec = torch.cat([ang_vel, projected_gravity, joint_pos, joint_vel, joint_torques, foot_contacts], dim=-1)
         if dones.any():
             done_indices = dones.nonzero(as_tuple=False).squeeze(-1)
             if done_indices.dim() == 0:
@@ -288,20 +321,19 @@ class IsaacLabVecEnvWrapper(VecEnv):
             self.episode_rewards_sum[dones] = 0.0
             self.episode_steps[dones] = 0.0
             
-            new_ang_vel, new_proj_grav, new_joint_pos, new_joint_vel, new_joint_torques, new_foot_contacts = self._get_robot_state()
-            self._update_prev_state(new_ang_vel, new_proj_grav, new_joint_pos, new_joint_vel, new_joint_torques, new_foot_contacts, done_indices)
-        
+            self._state_history[done_indices, :, :] = 0.0
+            self._state_history[done_indices, -1, :] = state_vec[done_indices]
+            self._action_history[done_indices, :, :] = 0.0
+            self._action_history[done_indices, -1, :] = actions[done_indices]
         non_done_mask = ~dones
         if non_done_mask.any():
             non_done_ids = non_done_mask.nonzero(as_tuple=False).squeeze(-1)
             if non_done_ids.dim() == 0:
                 non_done_ids = non_done_ids.unsqueeze(0)
-            self._prev_imu_ang_vel[non_done_ids] = ang_vel[non_done_ids]
-            self._prev_imu_projected_gravity[non_done_ids] = projected_gravity[non_done_ids]
-            self._prev_joint_pos[non_done_ids] = joint_pos[non_done_ids]
-            self._prev_joint_vel[non_done_ids] = joint_vel[non_done_ids]
-            self._prev_joint_torques[non_done_ids] = joint_torques[non_done_ids]
-            self._prev_foot_contacts[non_done_ids] = foot_contacts[non_done_ids]
+            self._state_history[non_done_ids] = torch.roll(self._state_history[non_done_ids], shifts=-1, dims=1)
+            self._state_history[non_done_ids, -1, :] = state_vec[non_done_ids]
+            self._action_history[non_done_ids] = torch.roll(self._action_history[non_done_ids], shifts=-1, dims=1)
+            self._action_history[non_done_ids, -1, :] = actions[non_done_ids]
         
         self._last_obs = self._convert_obs(obs_dict)
         
@@ -327,54 +359,29 @@ class IsaacLabVecEnvWrapper(VecEnv):
         return self._last_obs
 
     def _convert_obs(self, obs_dict):
-        """Convert Isaac Lab obs dict to TensorDict for RSL-RL."""
         policy_obs = obs_dict["policy"].float().contiguous()
-        
-        contact_states, foot_xy_positions, foot_heights = self.gait_scheduler.get_gait_obs()
-        
-        ang_vel_scale = self.sensor_cfg.angular_velocity_scale
-        joint_vel_scale = self.sensor_cfg.joint_velocity_scale
-        
-        prev_ang_vel = self._prev_imu_ang_vel * ang_vel_scale
-        prev_proj_grav = self._prev_imu_projected_gravity
-        prev_joint_pos = self._prev_joint_pos
-        prev_joint_vel = self._prev_joint_vel * joint_vel_scale
-        prev_joint_torques = self._prev_joint_torques
-        prev_foot_contacts = self._prev_foot_contacts
-        
         leg_phases = self.gait_scheduler.get_leg_phases()
         phase_angles = leg_phases * 2.0 * 3.14159265359
         phase_sin = torch.sin(phase_angles)
         phase_cos = torch.cos(phase_angles)
         phase_obs = torch.cat([phase_sin, phase_cos], dim=-1)
-        
-        foot_xy_flat = foot_xy_positions.reshape(self.num_envs, -1)
-        
-        policy_obs = torch.cat([
-            policy_obs,
-            prev_ang_vel,
-            prev_proj_grav,
-            prev_joint_pos,
-            prev_joint_vel,
-            prev_joint_torques,
-            prev_foot_contacts,
-            contact_states,
-            foot_xy_flat,
-            foot_heights,
+        with torch.no_grad():
+            encoded_history = self.history_encoder(self._state_history, self._action_history)
+        base_obs_keep = policy_obs[:, :46]
+        obs = torch.cat([
+            base_obs_keep,
+            encoded_history,
             phase_obs,
         ], dim=-1)
-        
         clip_val = self.sensor_cfg.obs_clip_value
-        policy_obs = torch.clamp(policy_obs, -clip_val, clip_val)
-        
-        if torch.isnan(policy_obs).any() or torch.isinf(policy_obs).any():
+        obs = torch.clamp(obs, -clip_val, clip_val)
+        if torch.isnan(obs).any() or torch.isinf(obs).any():
             self._nan_obs_count += 1
             if self._nan_obs_count <= 5:
                 print(f"WARNING: NaN/Inf in observations (count: {self._nan_obs_count})")
-            policy_obs = torch.nan_to_num(policy_obs, nan=0.0, posinf=clip_val, neginf=-clip_val)
-        
+            obs = torch.nan_to_num(obs, nan=0.0, posinf=clip_val, neginf=-clip_val)
         return TensorDict({
-            "policy": policy_obs
+            "policy": obs
         }, batch_size=[self.num_envs])
 
     def get_gait_scheduler(self) -> GaitScheduler:

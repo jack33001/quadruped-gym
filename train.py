@@ -192,66 +192,67 @@ class GaitRewardWrapper(IsaacLabVecEnvWrapper):
         return obs, rewards, dones, extras
     
     def _compute_gait_rewards(self) -> tuple[torch.Tensor, dict]:
-        """Compute gait scheduler tracking rewards."""
         gait_scheduler = self.gait_scheduler
         isaac_env = self._env
-        
+
         desired_contacts, desired_foot_xy, desired_heights = gait_scheduler.get_gait_obs()
-        
+
         foot_contact_sensor = isaac_env.scene.sensors["foot_contact"]
         contact_forces = foot_contact_sensor.data.net_forces_w
         contact_threshold = self.sensor_cfg.foot_contact_threshold
-        actual_contacts = (torch.norm(contact_forces, dim=-1) > contact_threshold).float()
-        
-        contact_match = 1.0 - torch.abs(desired_contacts - actual_contacts)
-        contact_reward = torch.mean(contact_match, dim=-1)
-        
+        actual_contacts = (torch.norm(contact_forces, dim=-1) / contact_threshold)
+
+        # Sigmoid smoothing for contact reward
+        contact_prob = torch.sigmoid(10.0 * (actual_contacts - 1.0))
+        contact_reward = 1.0 - torch.abs(desired_contacts - contact_prob)
+        contact_reward = torch.mean(contact_reward, dim=-1)
+
         robot = isaac_env.scene["robot"]
         body_pos = robot.data.body_pos_w
         root_pos = robot.data.root_pos_w
         root_quat = robot.data.root_quat_w
         num_feet = 4
-        
+
         if body_pos.shape[1] >= num_feet:
             foot_pos_world = body_pos[:, -num_feet:, :]
         else:
             foot_pos_world = body_pos[:, :num_feet, :]
-        
+
         foot_pos_local = self._world_to_body_frame(foot_pos_world, root_pos, root_quat)
-        
+
         terrain_height = torch.zeros(self.num_envs, device=self.device)
         if hasattr(isaac_env.scene, 'terrain') and isaac_env.scene.terrain is not None:
             terrain = isaac_env.scene.terrain
             if hasattr(terrain, 'env_origins'):
                 terrain_height = terrain.env_origins[:, 2]
-        
+
         foot_z_local = foot_pos_world[:, :, 2] - terrain_height.unsqueeze(-1)
         foot_z_local = torch.clamp(foot_z_local, min=0.0)
-        
+
         xy_error = foot_pos_local[:, :, :2] - desired_foot_xy
         xy_error_sq = (xy_error ** 2).sum(dim=-1)
-        
+
         z_error = foot_z_local - desired_heights
         z_error_sq = z_error ** 2
-        
+
         total_error_sq = xy_error_sq + z_error_sq
         trajectory_reward = torch.exp(-total_error_sq / (0.02 * 0.02))
         trajectory_reward = torch.mean(trajectory_reward, dim=-1)
-        
+
         gait_weight = self.reward_weights.gait_tracking_weight
         contact_weight = self.reward_weights.foot_contact_tracking
         trajectory_weight = self.reward_weights.foot_trajectory_tracking
-        
+
         weighted_contact = gait_weight * contact_weight * contact_reward
         weighted_trajectory = gait_weight * trajectory_weight * trajectory_reward
-        
+
         total_reward = weighted_contact + weighted_trajectory
-        
+
         reward_components = {
             "foot_contact": weighted_contact,
             "foot_trajectory": weighted_trajectory,
         }
-        
+
         return total_reward, reward_components
     
     def _compute_velocity_error(self) -> torch.Tensor:
